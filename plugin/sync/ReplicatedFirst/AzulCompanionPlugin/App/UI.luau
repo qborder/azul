@@ -27,6 +27,9 @@ local OptionSelector = require("./Components/OptionSelector")
 local Input = require("./Components/Input")
 local ScrollingContainer = require("./Components/ScrollingContainer")
 local Box = require("./Components/Box")
+local IconButton = require("./Components/IconButton")
+local Assets = require("./Assets")
+local Collapsible = require("./Components/Collapsible")
 
 local Value = fusion.Value
 local Computed = fusion.Computed
@@ -256,6 +259,8 @@ function UI.new(plugin, callbacks, settingsScope, helpers): AzulUI
 
 	self.serviceListRef = Value(nil)
 	self.excludedParentsRef = Value(nil)
+	self.settingsWidget = Value(nil)
+	self.helpWidget = Value(nil)
 
 	self.connectButton = ToolbarButton({
 		Toolbar = Toolbar({
@@ -269,11 +274,435 @@ function UI.new(plugin, callbacks, settingsScope, helpers): AzulUI
 		end,
 	})
 
+	local function createSettingsWidget()
+		local settingsOpen = Value(true)
+		local widget = Widget({
+			Name = "Azul Settings",
+			Id = "AzulSettings",
+			MinimumSize = Vector2.new(300, 320),
+			FloatingSize = Vector2.new(350, 480),
+			InitialDockTo = Enum.InitialDockState.Float,
+			InitialEnabled = true,
+			Enabled = settingsOpen,
+			Closed = function()
+				local w = peek(self.settingsWidget)
+				if w then
+					w:Destroy()
+					self.settingsWidget:set(nil)
+				end
+			end,
+			[Children] = {
+				Container({
+					Size = UDim2.fromScale(1, 1),
+					BackgroundColor3 = Theme.Colors.Background,
+					BackgroundTransparency = 0,
+					[Children] = {
+						ScrollingContainer({
+							ScrollBar = true,
+							[Children] = {
+								Padding {
+									Padding = Theme.WidgetPadding,
+								},
+								List({
+									Spacing = Theme.ListSpacing,
+								}),
+
+								-- General Settings Collapsible
+								Collapsible({
+									Title = "General Settings",
+									Expanded = true,
+									Elements = {
+										Container({
+											Size = UDim2.new(1, 0, 0, 0),
+											AutomaticSize = Enum.AutomaticSize.Y,
+											[Children] = {
+												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
+												List({ Spacing = Theme.ListSpacing }),
+
+												labeledToggle("Auto Connect", self.autoConnect, function(newValue)
+													Config.AUTO_CONNECT = newValue
+													if self.callbacks.onAutoConnectChanged then
+														self.callbacks.onAutoConnectChanged(newValue)
+													end
+												end),
+												infoText("Automatically attempts to connect to Daemon on startup."),
+
+												labeledToggle("Silent Mode", self.silentMode, function(newValue)
+													Config.SILENT_MODE = newValue
+													if self.callbacks.onSilentModeChanged then
+														self.callbacks.onSilentModeChanged(newValue)
+													end
+												end),
+												infoText("Suppresses all console output except errors."),
+
+												labeledToggle("Debug Mode", self.debugMode, function(newValue)
+													Config.DEBUG_MODE = newValue
+													if self.callbacks.onDebugModeChanged then
+														self.callbacks.onDebugModeChanged(newValue)
+													end
+												end),
+												infoText("Enables verbose logging in the output console."),
+
+												Text({
+													Text = "Settings Scope",
+													TextSize = Theme.TextSize.Small,
+													Color = Theme.Colors.TextDimmed,
+													AutomaticSize = Enum.AutomaticSize.XY,
+												}),
+												OptionSelector({
+													Options = { "Global", "Project" },
+													Value = self.settingsScopeValue,
+													Selected = function(option)
+														local scope = option == "Global" and Enums.scope.GLOBAL or Enums.scope.PROJECT
+														self.callbacks.onSettingsScopeChanged(scope)
+													end,
+												}),
+											}
+										})
+									},
+								}),
+
+								-- Connection Details Collapsible
+								Collapsible({
+									Title = "Connection Details",
+									Expanded = false,
+									Elements = {
+										Container({
+											Size = UDim2.new(1, 0, 0, 0),
+											AutomaticSize = Enum.AutomaticSize.Y,
+											[Children] = {
+												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
+												List({ Spacing = Theme.ListSpacing }),
+
+												labeledInput("Heartbeat Interval (seconds)", self.heartbeatRef, {
+													Text = tostring(Config.HEARTBEAT_INTERVAL),
+													Finished = function(text)
+														if text == "" then return end
+														validateNumberInput(text, function(value)
+															self.callbacks.onConfigChanged("HEARTBEAT_INTERVAL", value)
+														end)
+													end,
+												}),
+												labeledInput("Batch Idle Window (seconds)", self.batchIdleRef, {
+													Text = tostring(Config.BATCH_IDLE_WINDOW),
+													Finished = function(text)
+														if text == "" then return end
+														validateNumberInput(text, function(value)
+															self.callbacks.onConfigChanged("BATCH_IDLE_WINDOW", value)
+														end)
+													end,
+												}),
+												labeledInput("Script Change Debounce (seconds)", self.scriptDebounceRef, {
+													Text = tostring(Config.SCRIPT_CHANGE_DEBOUNCE),
+													Finished = function(text)
+														if text == "" then return end
+														validateNumberInput(text, function(value)
+															self.callbacks.onConfigChanged("SCRIPT_CHANGE_DEBOUNCE", value)
+														end)
+													end,
+												}),
+												labeledInput("Maximum Handshake Attempts", self.maxHandshakesRef, {
+													Text = tostring(Config.MAX_HANDSHAKES),
+													Finished = function(text)
+														if text == "" then return end
+														validateNumberInput(text, function(value)
+															self.callbacks.onConfigChanged("MAX_HANDSHAKES", value)
+														end)
+													end,
+												}),
+												labeledInput("Maximum Reconnection Attempts", self.maxReconnectionsRef, {
+													Text = tostring(Config.MAX_RECONNECTIONS),
+													Placeholder = "-1 for infinite attempts",
+													Finished = function(text)
+														if text == "" then return end
+														validateNumberInput(text, function(value)
+															self.callbacks.onConfigChanged("MAX_RECONNECTIONS", value)
+														end, true)
+													end,
+												}),
+												labeledInput("Reconnection Interval (seconds)", self.reconnectionIntervalRef, {
+													Text = tostring(Config.RECONNECTION_INTERVAL),
+													Finished = function(text)
+														if text == "" then return end
+														validateNumberInput(text, function(value)
+															self.callbacks.onConfigChanged("RECONNECTION_INTERVAL", value)
+														end)
+													end,
+												}),
+											}
+										})
+									},
+								}),
+
+								-- Service Filters Collapsible
+								Collapsible({
+									Title = "Service Filters",
+									Expanded = false,
+									Elements = {
+										Container({
+											Size = UDim2.new(1, 0, 0, 0),
+											AutomaticSize = Enum.AutomaticSize.Y,
+											[Children] = {
+												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
+												List({ Spacing = Theme.ListSpacing }),
+
+												Text({
+													Text = "List Type",
+													TextSize = Theme.TextSize.Small,
+													Color = Theme.Colors.TextDimmed,
+													AutomaticSize = Enum.AutomaticSize.XY,
+												}),
+												OptionSelector({
+													Options = { "Whitelist", "Blacklist" },
+													Value = self.listTypeValue,
+													Selected = function(option)
+														self.callbacks.onConfigChanged(
+															"LIST_TYPE",
+															option == "Whitelist" and Enums.listType.WHITELIST
+																or Enums.listType.BLACKLIST
+														)
+													end,
+												}),
+												labeledInput("Service List (comma-separated)", self.serviceListRef, {
+													Text = table.concat(Config.SERVICE_LIST, ", "),
+													BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
+													Finished = function(text)
+														local items = AzulService.parseCommaSeparatedList(text)
+														self.callbacks.onConfigChanged("SERVICE_LIST", items)
+													end,
+												}),
+												labeledInput("Excluded Parents (comma-separated)", self.excludedParentsRef, {
+													Text = table.concat(Config.EXCLUDED_PARENTS, ", "),
+													BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
+													Finished = function(text)
+														local items = AzulService.parseCommaSeparatedList(text)
+														self.callbacks.onConfigChanged("EXCLUDED_PARENTS", items)
+													end,
+												}),
+											}
+										})
+									},
+								}),
+
+								-- Developer Tools Collapsible
+								Collapsible({
+									Title = "Developer Tools",
+									Expanded = false,
+									Elements = {
+										Container({
+											Size = UDim2.new(1, 0, 0, 0),
+											AutomaticSize = Enum.AutomaticSize.Y,
+											[Children] = {
+												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
+												List({ Spacing = Theme.ListSpacing }),
+
+												TextButton({
+													Text = "Reload Sourcemap",
+													Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
+													Activated = function()
+														self.callbacks.onSourcemapReload()
+													end,
+												}),
+												infoText("Force reload the sourcemap file from disk to reset the sync state."),
+												
+												TextButton({
+													Text = "Open Place Configuration",
+													Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
+													Activated = function()
+														helpers.openPlaceConfig()
+													end,
+												}),
+												infoText("Open the per-place configuration script in ServerStorage."),
+											}
+										})
+									},
+								}),
+							},
+						}),
+					},
+				}),
+			},
+		})
+
+		task.defer(function()
+			self:UpdateConfig()
+		end)
+
+		return widget
+	end
+
+	local function createHelpWidget()
+		local helpOpen = Value(true)
+		local widget = Widget({
+			Name = "Azul Help",
+			Id = "AzulHelp",
+			MinimumSize = Vector2.new(300, 300),
+			FloatingSize = Vector2.new(340, 380),
+			InitialDockTo = Enum.InitialDockState.Float,
+			InitialEnabled = true,
+			Enabled = helpOpen,
+			Closed = function()
+				local w = peek(self.helpWidget)
+				if w then
+					w:Destroy()
+					self.helpWidget:set(nil)
+				end
+			end,
+			[Children] = {
+				Container({
+					Size = UDim2.fromScale(1, 1),
+					BackgroundColor3 = Theme.Colors.Background,
+					BackgroundTransparency = 0,
+					[Children] = {
+						Padding {
+							Padding = Theme.WidgetPadding,
+						},
+						List({
+							VerticalAlignment = Enum.VerticalAlignment.Center,
+							Spacing = Theme.ListSpacing,
+						}),
+						infoText("<b>How to connect:</b>\n1. Run the daemon on your computer by running <font family='rbxasset://fonts/families/RobotoMono.json'>azul</font> in a terminal.\n2. Ensure the daemon's port matches the WebSocket URL in the settings (default: ws://localhost:8080).\n3. Click 'Connect' on the home screen.\n\n<b>HTTP Service requirement:</b>\nTo synchronize files, allow HTTP requests in Studio:\nHome → Game Settings → Security → Enable 'Allow HTTP Requests'"),
+						
+						infoText("<b>Troubleshooting:</b>\n- If synchronization fails, click 'Reload Sourcemap' in the Settings under 'Tools' tab.\n- Verify port 8080 is not blocked by your firewall.\n- Make sure the daemon is running in the correct folder."),
+					},
+				}),
+			},
+		})
+		return widget
+	end
+
+	local function renderHomeView()
+		return {
+			-- Header Container
+			Container({
+				Size = UDim2.new(1, 0, 0, 48),
+				AutomaticSize = Enum.AutomaticSize.None,
+				[Children] = {
+					-- Left side (Logo + Name)
+					Container({
+						Size = UDim2.fromScale(0.7, 1),
+						AutomaticSize = Enum.AutomaticSize.None,
+						[Children] = {
+							List({
+								FillDirection = Enum.FillDirection.Horizontal,
+								VerticalAlignment = Enum.VerticalAlignment.Center,
+								Spacing = 10,
+							}),
+							Image({
+								Size = UDim2.fromOffset(36, 36),
+								Image = self.icon,
+							}),
+							Text({
+								Text = "<b>Azul</b>",
+								FontFace = Theme.Fonts.Mono,
+								TextSize = Theme.TextSize.Heading,
+								Color = Theme.Colors.Text,
+								AutomaticSize = Enum.AutomaticSize.Y,
+							}),
+						},
+					}),
+					-- Right side (Version)
+					Text({
+						Text = `v{AzulService.VERSION}`,
+						FontFace = Theme.Fonts.Regular,
+						TextSize = Theme.TextSize.Small,
+						Color = Theme.Colors.TextDimmed,
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.fromScale(1, 0.5),
+						TextXAlignment = Enum.TextXAlignment.Right,
+						AutomaticSize = Enum.AutomaticSize.XY,
+					}),
+				},
+			}),
+
+			-- Clean URL Input Box (Monospace, Centered, Centered Text)
+			Box({
+				Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Large),
+				AutomaticSize = Enum.AutomaticSize.None,
+				[Children] = {
+					Padding({
+						Padding = 8,
+						Vertical = false,
+					}),
+					Input({
+						Text = Config.WS_URL,
+						PlaceholderText = "ws://localhost:8080",
+						TextXAlignment = Enum.TextXAlignment.Center,
+						FontFace = Theme.Fonts.Mono,
+						TextSize = Theme.TextSize.Medium,
+						Size = UDim2.fromScale(1, 1),
+						[Ref] = self.wsUrlRef,
+						Finished = function(text)
+							if text == "" then return end
+							self.callbacks.onConfigChanged("WS_URL", text)
+						end,
+					}),
+				},
+			}),
+
+			-- Action Row
+			Container({
+				Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Large),
+				AutomaticSize = Enum.AutomaticSize.None,
+				[Children] = {
+					List({
+						FillDirection = Enum.FillDirection.Horizontal,
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Spacing = 8,
+					}),
+
+					IconButton({
+						Icon = Assets.Icons.Help,
+						Activated = function()
+							local w = peek(self.helpWidget)
+							if w then
+								w:Destroy()
+								self.helpWidget:set(nil)
+							else
+								self.helpWidget:set(createHelpWidget())
+							end
+						end,
+					}),
+
+					IconButton({
+						Icon = Assets.Icons.Settings,
+						Activated = function()
+							local w = peek(self.settingsWidget)
+							if w then
+								w:Destroy()
+								self.settingsWidget:set(nil)
+							else
+								self.settingsWidget:set(createSettingsWidget())
+							end
+						end,
+					}),
+
+					TextButton({
+						Text = Computed(function(use)
+							if not use(self.syncEnabled) then return "Connect" end
+							if use(self.handshakeComplete) then return "Disconnect" end
+							return "Awaiting Daemon..."
+						end),
+						Size = UDim2.new(1, -(Theme.CompSizeY.Large * 2 + 16), 1, 0),
+						Solid = true,
+						Activated = function()
+							if peek(self.syncEnabled) then
+								self.callbacks.onStopSync()
+							else
+								self.callbacks.onStartSync()
+							end
+						end,
+					}),
+				},
+			}),
+		}
+	end
+
 	local widget = Widget({
 		Name = "Azul",
 		Id = "Azul",
-		MinimumSize = Vector2.new(300, 300),
-		FloatingSize = Vector2.new(345, 640),
+		MinimumSize = Vector2.new(300, 160),
+		FloatingSize = Vector2.new(345, 180),
 		InitialDockTo = Enum.InitialDockState.Float,
 		InitialEnabled = true,
 		Enabled = self.isOpen,
@@ -284,218 +713,14 @@ function UI.new(plugin, callbacks, settingsScope, helpers): AzulUI
 				BackgroundColor3 = Theme.Colors.Background,
 				BackgroundTransparency = 0,
 				[Children] = {
-					ScrollingContainer({
-						ScrollBar = true,
-						[Children] = {
-							Padding {
-								Padding = Theme.WidgetPadding,
-							},
-							List({
-								Spacing = Theme.ListSpacing,
-							}),
-							Container({
-								Size = UDim2.fromScale(1, 0),
-								AutomaticSize = Enum.AutomaticSize.Y,
-								[Children] = {
-									List({
-										FillDirection = Enum.FillDirection.Horizontal,
-										HorizontalAlignment = Enum.HorizontalAlignment.Center,
-										VerticalAlignment = Enum.VerticalAlignment.Center,
-										Spacing = 10,
-									}),
-									Image({
-										Size = UDim2.fromOffset(36, 36),
-										Image = self.icon,
-									}),
-									Text({
-										Text = "Azul",
-										FontFace = Theme.Fonts.Mono,
-										TextSize = Theme.TextSize.Heading,
-
-										AutomaticSize = Enum.AutomaticSize.XY,
-									}),
-								},
-							}),
-							TextButton({
-								Text = Computed(function(use)
-									if not use(self.syncEnabled) then return "Connect" end
-									if use(self.handshakeComplete) then return "Disconnect" end
-									return "Awaiting Daemon..."
-								end),
-								Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Large),
-								Solid = true,
-								Activated = function()
-									if peek(self.syncEnabled) then
-										self.callbacks.onStopSync()
-									else
-										self.callbacks.onStartSync()
-									end
-								end,
-							}),
-							section("Behavior", {
-								labeledToggle("Auto Connect", self.autoConnect, function(newValue)
-									Config.AUTO_CONNECT = newValue
-									if self.callbacks.onAutoConnectChanged then
-										self.callbacks.onAutoConnectChanged(newValue)
-									end
-								end),
-								infoText("Automatically attempts to connect to Daemon."),
-								labeledToggle("Silent Mode", self.silentMode, function(newValue)
-									Config.SILENT_MODE = newValue
-									if self.callbacks.onSilentModeChanged then
-										self.callbacks.onSilentModeChanged(newValue)
-									end
-								end),
-								infoText("Suppresses all console output except errors."),
-								labeledToggle("Debug Mode", self.debugMode, function(newValue)
-									Config.DEBUG_MODE = newValue
-									if self.callbacks.onDebugModeChanged then
-										self.callbacks.onDebugModeChanged(newValue)
-									end
-								end),
-								infoText("Enables verbose logging in the output console."),
-								Text({
-									Text = "Settings Scope",
-									TextSize = Theme.TextSize.Small,
-									Color = Theme.Colors.TextDimmed,
-									AutomaticSize = Enum.AutomaticSize.XY,
-								}),
-								OptionSelector({
-									Options = { "Global", "Project" },
-									Value = self.settingsScopeValue,
-									Selected = function(option)
-										local scope = option == "Global" and Enums.scope.GLOBAL or Enums.scope.PROJECT
-										self.callbacks.onSettingsScopeChanged(scope)
-									end,
-								}),
-							}),
-							section("Connection", {
-								labeledInput("WebSocket URL", self.wsUrlRef, {
-									Text = "ws://localhost:8080",
-									Finished = function(text)
-										if text == "" then return end
-										self.callbacks.onConfigChanged("WS_URL", text)
-									end,
-								}),
-								labeledInput("Heartbeat Interval (seconds)", self.heartbeatRef, {
-									Text = tostring(Config.HEARTBEAT_INTERVAL),
-									Finished = function(text)
-										if text == "" then return end
-										validateNumberInput(text, function(value)
-											self.callbacks.onConfigChanged("HEARTBEAT_INTERVAL", value)
-										end)
-									end,
-								}),
-								labeledInput("Batch Idle Window (seconds)", self.batchIdleRef, {
-									Text = tostring(Config.BATCH_IDLE_WINDOW),
-									Finished = function(text)
-										if text == "" then return end
-										validateNumberInput(text, function(value)
-											self.callbacks.onConfigChanged("BATCH_IDLE_WINDOW", value)
-										end)
-									end,
-								}),
-								labeledInput("Script Change Debounce (seconds)", self.scriptDebounceRef, {
-									Text = tostring(Config.SCRIPT_CHANGE_DEBOUNCE),
-									Finished = function(text)
-										if text == "" then return end
-										validateNumberInput(text, function(value)
-											self.callbacks.onConfigChanged("SCRIPT_CHANGE_DEBOUNCE", value)
-										end)
-									end,
-								}),
-							}),
-							section("Auto Connect", {
-								labeledInput("Maximum Handshake Attempts", self.maxHandshakesRef, {
-									Text = tostring(Config.MAX_HANDSHAKES),
-									Finished = function(text)
-										if text == "" then return end
-										validateNumberInput(text, function(value)
-											self.callbacks.onConfigChanged("MAX_HANDSHAKES", value)
-										end)
-									end,
-								}),
-								labeledInput("Maximum Reconnection Attempts", self.maxReconnectionsRef, {
-									Text = tostring(Config.MAX_RECONNECTIONS),
-									Placeholder = "-1 for infinite attempts",
-									Finished = function(text)
-										if text == "" then return end
-										validateNumberInput(text, function(value)
-											self.callbacks.onConfigChanged("MAX_RECONNECTIONS", value)
-										end, true)
-									end,
-								}),
-								labeledInput("Reconnection Interval (seconds)", self.reconnectionIntervalRef, {
-									Text = tostring(Config.RECONNECTION_INTERVAL),
-									Finished = function(text)
-										if text == "" then return end
-										validateNumberInput(text, function(value)
-											self.callbacks.onConfigChanged("RECONNECTION_INTERVAL", value)
-										end)
-									end,
-								}),
-							}),
-							section("Filters", {
-								Text({
-									Text = "List Type",
-									TextSize = Theme.TextSize.Small,
-									Color = Theme.Colors.TextDimmed,
-									AutomaticSize = Enum.AutomaticSize.XY,
-								}),
-								OptionSelector({
-									Options = { "Whitelist", "Blacklist" },
-									Value = self.listTypeValue,
-									Selected = function(option)
-										self.callbacks.onConfigChanged(
-											"LIST_TYPE",
-											option == "Whitelist" and Enums.listType.WHITELIST
-												or Enums.listType.BLACKLIST
-										)
-									end,
-								}),
-								labeledInput("Service List (comma-separated)", self.serviceListRef, {
-									Text = table.concat(Config.SERVICE_LIST, ", "),
-									-- MultiLine = true,
-									BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
-									Finished = function(text)
-										local items = AzulService.parseCommaSeparatedList(text)
-										self.callbacks.onConfigChanged("SERVICE_LIST", items)
-									end,
-								}),
-								labeledInput("Excluded Parents (comma-separated)", self.excludedParentsRef, {
-									Text = table.concat(Config.EXCLUDED_PARENTS, ", "),
-									-- MultiLine = true,
-									BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
-									Finished = function(text)
-										local items = AzulService.parseCommaSeparatedList(text)
-										self.callbacks.onConfigChanged("EXCLUDED_PARENTS", items)
-									end,
-								}),
-							}),
-							section("Tools", {
-								TextButton {
-									Text = "Reload Sourcemap",
-									Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
-									Activated = function()
-										self.callbacks.onSourcemapReload()
-									end,
-								},
-								TextButton {
-									Text = "Open Place Configuration",
-									Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
-									Activated = function()
-										helpers.openPlaceConfig()
-									end,
-								},
-							}),
-							Text {
-								Text = `Azul Plugin v{AzulService.VERSION}`,
-								TextSize = Theme.TextSize.Small,
-								Color = Theme.Colors.TextDimmed,
-								AutomaticSize = Enum.AutomaticSize.XY,
-							},
-						},
+					Padding({
+						Padding = Theme.WidgetPadding,
 					}),
+					List({
+						VerticalAlignment = Enum.VerticalAlignment.Center,
+						Spacing = Theme.ListSpacing,
+					}),
+					renderHomeView(),
 				},
 			}),
 		},
