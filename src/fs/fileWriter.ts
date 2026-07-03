@@ -368,6 +368,29 @@ export class FileWriter {
   }
 
   /**
+   * Register a file mapping without writing to disk
+   */
+  public registerMapping(guid: string, filePath: string, className: string): void {
+    this.fileMappings.set(guid, {
+      guid,
+      filePath,
+      className,
+    });
+    this.pathToGuid.set(path.resolve(filePath), guid);
+  }
+
+  /**
+   * Delete a file mapping in memory
+   */
+  public deleteMapping(guid: string): void {
+    const mapping = this.fileMappings.get(guid);
+    if (mapping) {
+      this.fileMappings.delete(guid);
+      this.pathToGuid.delete(path.resolve(mapping.filePath));
+    }
+  }
+
+  /**
    * Get the base directory
    */
   public getBaseDir(): string {

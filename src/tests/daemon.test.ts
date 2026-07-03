@@ -209,3 +209,114 @@ test("deleted removes files and updates sourcemap", async () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("filesystem-initiated file creation (add event) triggers instanceUpdated message", async () => {
+  const tmp = makeTempDir();
+  const prevSyncDir = config.syncDir;
+  const prevSourcemapPath = config.sourcemapPath;
+  const prevPort = config.port;
+  let daemon: SyncDaemon | undefined;
+  try {
+    config.syncDir = tmp;
+    config.sourcemapPath = path.join(tmp, "sourcemap.json");
+    config.port = 0;
+
+    daemon = new SyncDaemon();
+
+    const sentMessages: any[] = [];
+    (daemon as any).ipc.send = (msg: any) => {
+      sentMessages.push(msg);
+      return true;
+    };
+
+    const newFilePath = path.join(tmp, "ReplicatedStorage", "NewScript.server.lua");
+    fs.mkdirSync(path.dirname(newFilePath), { recursive: true });
+    fs.writeFileSync(newFilePath, "print('hello world')", "utf8");
+
+    (daemon as any).handleFsEvent("add", newFilePath, "print('hello world')");
+
+    const folderMsg = sentMessages.find(
+      (m: any) => m.type === "instanceUpdated" && m.data.className === "Folder" && m.data.name === "ReplicatedStorage"
+    );
+    const scriptMsg = sentMessages.find(
+      (m: any) => m.type === "instanceUpdated" && m.data.className === "Script" && m.data.name === "NewScript"
+    );
+
+    assert.ok(folderMsg, "folder creation message sent");
+    assert.ok(scriptMsg, "script creation message sent");
+    assert.deepStrictEqual(scriptMsg.data.path, ["ReplicatedStorage", "NewScript"]);
+    assert.strictEqual(scriptMsg.data.source, "print('hello world')");
+
+    const treeNode = (daemon as any).tree.getNode(scriptMsg.data.guid);
+    assert.ok(treeNode, "tree node created in memory");
+    assert.strictEqual(treeNode.name, "NewScript");
+    assert.strictEqual(treeNode.source, "print('hello world')");
+  } finally {
+    await daemon?.stop();
+    config.syncDir = prevSyncDir;
+    config.sourcemapPath = prevSourcemapPath;
+    config.port = prevPort;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("filesystem-initiated file deletion (unlink event) triggers deleted message", async () => {
+  const tmp = makeTempDir();
+  const prevSyncDir = config.syncDir;
+  const prevSourcemapPath = config.sourcemapPath;
+  const prevPort = config.port;
+  let daemon: SyncDaemon | undefined;
+  try {
+    config.syncDir = tmp;
+    config.sourcemapPath = path.join(tmp, "sourcemap.json");
+    config.port = 0;
+
+    daemon = new SyncDaemon();
+
+    const instances = [
+      {
+        guid: "r1",
+        className: "Folder",
+        name: "ReplicatedStorage",
+        path: ["ReplicatedStorage"],
+      },
+      {
+        guid: "s1",
+        className: "Script",
+        name: "ToDelete",
+        path: ["ReplicatedStorage", "ToDelete"],
+        source: "print('delete me')",
+      },
+    ];
+    (daemon as any).handleStudioMessage({
+      type: "fullSnapshot",
+      data: instances,
+    });
+
+    const scriptPath = path.join(tmp, "ReplicatedStorage", "ToDelete.server.luau");
+    assert.ok(fs.existsSync(scriptPath), "script path was written");
+
+    const sentMessages: any[] = [];
+    (daemon as any).ipc.send = (msg: any) => {
+      sentMessages.push(msg);
+      return true;
+    };
+
+    fs.unlinkSync(scriptPath);
+    (daemon as any).handleFsEvent("unlink", scriptPath);
+
+    const deletedMsg = sentMessages.find(
+      (m: any) => m.type === "deleted" && m.data.guid === "s1"
+    );
+    assert.ok(deletedMsg, "deleted message sent for guid s1");
+
+    const treeNode = (daemon as any).tree.getNode("s1");
+    assert.strictEqual(treeNode, undefined, "tree node removed from TreeManager");
+  } finally {
+    await daemon?.stop();
+    config.syncDir = prevSyncDir;
+    config.sourcemapPath = prevSourcemapPath;
+    config.port = prevPort;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -811,6 +811,41 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 					end)
 				end
 			end
+		elseif message.type == "instanceUpdated" then
+			self:debugPrint("Instance update received from daemon:", message.data.name)
+			setOutboundSuppressed(true)
+
+			local ok, err = pcall(function()
+				local created, updated, appliedGuidMap = AzulService.applySnapshotInstances({ message.data })
+				for guid, instance in pairs(appliedGuidMap) do
+					self.guidMap[guid] = instance
+					self.trackedInstances[instance] = guid
+					attachListeners(instance)
+				end
+			end)
+
+			setOutboundSuppressed(false)
+			if not ok then
+				warn("[Azul]: Error applying instance update: ", err)
+			end
+		elseif message.type == "deleted" then
+			self:debugPrint("Instance deletion received from daemon, GUID:", message.data.guid)
+			setOutboundSuppressed(true)
+
+			local ok, err = pcall(function()
+				local instance = self.guidMap[message.data.guid]
+				if instance then
+					self.trackedInstances[instance] = nil
+					self.guidMap[message.data.guid] = nil
+					self.usedGuids[message.data.guid] = nil
+					instance:Destroy()
+				end
+			end)
+
+			setOutboundSuppressed(false)
+			if not ok then
+				warn("[Azul]: Error applying deletion: ", err)
+			end
 		elseif message.type == "daemonDisconnect" then
 			self:infoPrint("Daemon is shutting down; disconnecting plugin")
 			self:stopSync(true)

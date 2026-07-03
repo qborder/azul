@@ -10,6 +10,8 @@ import { SourcemapGenerator } from "./sourcemap/generator.js";
 import { log } from "./util/log.js";
 import { config, initializeConfig } from "./config.js";
 import type { StudioMessage } from "./ipc/messages.js";
+import { generateGUID } from "./util/id.js";
+import { classifyScriptFileName } from "./util/scriptFile.js";
 
 /**
  * Main orchestrator for the Azul daemon
@@ -56,8 +58,8 @@ export class SyncDaemon {
     });
 
     // Handle file changes from filesystem
-    this.fileWatcher.onChange((filePath, source) => {
-      this.handleFileChange(filePath, source);
+    this.fileWatcher.onChange((eventType, filePath, source) => {
+      this.handleFsEvent(eventType, filePath, source);
     });
   }
 
@@ -280,6 +282,9 @@ export class SyncDaemon {
 
     // Delete files for all affected scripts
     for (const entry of scriptsToDelete) {
+      if (entry.filePath) {
+        this.fileWatcher.suppressNextChange(entry.filePath);
+      }
       const removed = this.fileWriter.deleteScript(entry.guid);
       if (!removed && entry.filePath) {
         this.fileWriter.deleteFilePath(entry.filePath);
@@ -313,18 +318,42 @@ export class SyncDaemon {
   }
 
   /**
-   * Handle file change from filesystem
+   * Handle filesystem events (add, change, unlink)
    */
-  private handleFileChange(filePath: string, source: string): void {
-    // Find the GUID for this file
+  private handleFsEvent(
+    eventType: "add" | "change" | "unlink",
+    filePath: string,
+    source?: string,
+  ): void {
     const guid = this.fileWriter.getGuidByPath(filePath);
 
-    if (guid) {
+    if (eventType === "unlink") {
+      if (!guid) return;
+      const node = this.tree.getNode(guid);
+      if (!node) return;
+
+      log.info(`File deleted externally: ${path.relative(this.fileWriter.getBaseDir(), filePath)}`);
+
+      // Remove from local tree
+      this.tree.deleteInstance(guid);
+
+      // Remove from fileWriter mappings
+      this.fileWriter.deleteMapping(guid);
+
+      // Send delete message to Studio
+      this.ipc.send({
+        type: "deleted",
+        data: { guid },
+      });
+
+      // Regenerate sourcemap
+      this.regenerateSourcemap();
+      this.fileWriter.cleanupEmptyDirectories();
+    } else if (eventType === "change" && guid) {
       log.info(
         `File changed externally: ${path.relative(this.fileWriter.getBaseDir(), filePath)}`,
       );
 
-      // Same-source anti-echo should be handled in watcher.ts, this is just in case
       const node = this.tree.getNode(guid);
       if (node?.source === source) {
         log.debug(
@@ -334,12 +363,81 @@ export class SyncDaemon {
       }
 
       // Update tree
-      this.tree.updateScriptSource(guid, source);
+      this.tree.updateScriptSource(guid, source || "");
 
-      // Send patch to Studio (WebSocket client)
-      this.ipc.patchScript(guid, source);
-    } else {
-      log.warn(`No mapping found for file: ${filePath}`);
+      // Send patch to Studio
+      this.ipc.patchScript(guid, source || "");
+    } else if (eventType === "add" || (eventType === "change" && !guid)) {
+      // If a mapping already exists for this path, treat it as a change
+      if (guid) {
+        this.handleFsEvent("change", filePath, source);
+        return;
+      }
+
+      const newGuid = generateGUID();
+      const relPath = path.relative(this.fileWriter.getBaseDir(), filePath);
+      const parts = relPath.split(path.sep).filter(Boolean);
+      if (parts.length === 0) return;
+
+      const fileName = parts[parts.length - 1];
+      const { className, scriptName } = classifyScriptFileName(fileName, {
+        stripDisambiguationSuffix: true,
+      });
+      const parentSegments = parts.slice(0, -1);
+      const instancePath = [...parentSegments, scriptName];
+
+      log.info(`File created externally: ${relPath}`);
+
+      // Ensure intermediate folders exist in the tree and in Studio
+      let currentSegments: string[] = [];
+      let parentGuid: string | null = "root";
+
+      for (const segment of parentSegments) {
+        currentSegments.push(segment);
+        let folderNode = this.tree.getNodeByPath(currentSegments);
+        if (!folderNode) {
+          const folderGuid = generateGUID();
+          const folderData = {
+            guid: folderGuid,
+            className: "Folder",
+            name: segment,
+            path: [...currentSegments],
+            parentGuid,
+          };
+          this.tree.updateInstance(folderData);
+          folderNode = this.tree.getNode(folderGuid)!;
+
+          // Send folder creation to Studio
+          this.ipc.send({
+            type: "instanceUpdated",
+            data: folderData,
+          });
+        }
+        parentGuid = folderNode.guid;
+      }
+
+      // Create the script node in tree
+      const scriptData = {
+        guid: newGuid,
+        className,
+        name: scriptName,
+        path: instancePath,
+        parentGuid,
+        source: source || "",
+      };
+      this.tree.updateInstance(scriptData);
+
+      // Register mapping in fileWriter
+      this.fileWriter.registerMapping(newGuid, filePath, className);
+
+      // Send script creation to Studio
+      this.ipc.send({
+        type: "instanceUpdated",
+        data: scriptData,
+      });
+
+      // Regenerate sourcemap
+      this.regenerateSourcemap();
     }
   }
 

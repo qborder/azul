@@ -358,6 +358,13 @@ export class TreeManager {
   }
 
   /**
+   * Find a node by its path (public interface)
+   */
+  public getNodeByPath(path: string[]): TreeNode | undefined {
+    return this.findNodeByPath(path);
+  }
+
+  /**
    * Find a node by its path
    */
   private findNodeByPath(path: string[]): TreeNode | undefined {

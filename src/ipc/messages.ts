@@ -114,7 +114,9 @@ export type DaemonMessage =
   | BuildSnapshotMessage
   | RequestPushConfigMessage
   | PushSnapshotMessage
-  | HandshakeAckMessage;
+  | HandshakeAckMessage
+  | DeletedMessage
+  | InstanceUpdatedMessage;
 
 export interface PatchScriptMessage {
   type: "patchScript";
