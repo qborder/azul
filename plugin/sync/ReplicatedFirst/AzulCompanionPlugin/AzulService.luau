@@ -1,12 +1,16 @@
 --!strict
 local AzulService = {}
 AzulService.VERSION = 44
+-- Integer wire-protocol version. MUST match the daemon's PROTOCOL_VERSION
+-- (src/ipc/protocol.ts). Bump when the on-the-wire message format changes.
+AzulService.PROTOCOL_VERSION = 1
 
 -- Services
 local ScriptEditorService = game:GetService("ScriptEditorService")
 local HttpService = game:GetService("HttpService")
 local AssetService = game:GetService("AssetService")
 local InsertService = game:GetService("InsertService")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
 -- Modules
 local Serializer = require("./Serializer")
@@ -35,6 +39,178 @@ end
 
 function AzulService.isScriptClass(className)
 	return className == "Script" or className == "LocalScript" or className == "ModuleScript"
+end
+
+--[=[
+	Runs `apply` wrapped in a ChangeHistoryService recording so the entire
+	operation can be undone/redone as a single waypoint. Commits on success,
+	cancels on error. Falls back to running `apply` directly (still via pcall)
+	when recordings are unavailable (e.g. a recording is already in progress).
+	@param name string - Unique recording identifier
+	@param displayName string - Human-readable label shown in the undo history
+	@param apply () -> () - The mutation to perform
+	@return boolean, any - ok, error (matching pcall semantics)
+]=]
+function AzulService.withRecording(name: string, displayName: string, apply: () -> ()): (boolean, any)
+	local recording: any = nil
+	local okBegin = pcall(function()
+		recording = ChangeHistoryService:TryBeginRecording(name, displayName)
+	end)
+
+	if not okBegin or not recording then
+		-- No recording available; still run the mutation so behavior is unchanged.
+		return pcall(apply)
+	end
+
+	local okApply, err = pcall(apply)
+
+	pcall(function()
+		local operation = if okApply
+			then Enum.FinishRecordingOperation.Commit
+			else Enum.FinishRecordingOperation.Cancel
+		ChangeHistoryService:FinishRecording(recording, operation)
+	end)
+
+	return okApply, err
+end
+
+--[=[
+	Displays a modal dialog window styled with current Studio theme colors
+	and prompts the user with Yes/No-like choices (Proceed/Cancel) for
+	critical operations. Loops and yields until the user clicks a button
+	or closes the window.
+	@param plugin Plugin - The Roblox plugin instance
+	@param title string - Dialog window title
+	@param messageText string - Description/details of the change
+	@return boolean - True if the user clicked Proceed, false otherwise
+]=]
+function AzulService.promptConfirmation(plugin: Plugin, title: string, messageText: string): boolean
+	local widgetInfo = DockWidgetPluginGuiInfo.new(
+		Enum.InitialDockState.Float,
+		true, -- enabled
+		true, -- override previous enabled state (force it to show)
+		400, -- default width
+		150, -- default height
+		400, -- min width
+		150  -- min height
+	)
+	
+	local dialog = plugin:CreateDockWidgetPluginGui("AzulConfirmation_" .. HttpService:GenerateGUID(false), widgetInfo)
+	dialog.Title = title
+	dialog.Enabled = true
+	
+	local decision = nil
+	local event = Instance.new("BindableEvent")
+	
+	-- Create GUI
+	local container = Instance.new("Frame")
+	container.Size = UDim2.fromScale(1, 1)
+	
+	local studioTheme = settings().Studio.Theme
+	container.BackgroundColor3 = studioTheme:GetColor(Enum.StudioStyleGuideColor.Background, Enum.StudioStyleGuideModifier.Default)
+	container.BorderSizePixel = 0
+	container.Parent = dialog
+	
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 10)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+	layout.Parent = container
+	
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft = UDim.new(0, 15)
+	padding.PaddingRight = UDim.new(0, 15)
+	padding.PaddingTop = UDim.new(0, 10)
+	padding.PaddingBottom = UDim.new(0, 10)
+	padding.Parent = container
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 0.5, 0)
+	label.BackgroundTransparency = 1
+	label.TextColor3 = studioTheme:GetColor(Enum.StudioStyleGuideColor.Text, Enum.StudioStyleGuideModifier.Default)
+	label.Font = Enum.Font.SourceSans
+	label.TextSize = 15
+	label.TextWrapped = true
+	label.Text = messageText
+	label.TextXAlignment = Enum.TextXAlignment.Center
+	label.TextYAlignment = Enum.TextYAlignment.Center
+	label.LayoutOrder = 1
+	label.Parent = container
+	
+	local buttonFrame = Instance.new("Frame")
+	buttonFrame.Size = UDim2.new(1, 0, 0, 32)
+	buttonFrame.BackgroundTransparency = 1
+	buttonFrame.LayoutOrder = 2
+	buttonFrame.Parent = container
+	
+	local buttonLayout = Instance.new("UIListLayout")
+	buttonLayout.FillDirection = Enum.FillDirection.Horizontal
+	buttonLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	buttonLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	buttonLayout.Padding = UDim.new(0, 20)
+	buttonLayout.Parent = buttonFrame
+	
+	local function createButton(text, isPrimary)
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.new(0, 90, 1, 0)
+		btn.Font = Enum.Font.SourceSansBold
+		btn.TextSize = 14
+		btn.Text = text
+		
+		if isPrimary then
+			btn.BackgroundColor3 = Color3.fromRGB(0, 162, 255)
+			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		else
+			btn.BackgroundColor3 = studioTheme:GetColor(Enum.StudioStyleGuideColor.Button, Enum.StudioStyleGuideModifier.Default)
+			btn.TextColor3 = studioTheme:GetColor(Enum.StudioStyleGuideColor.ButtonText, Enum.StudioStyleGuideModifier.Default)
+		end
+		
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 4)
+		corner.Parent = btn
+		
+		btn.Parent = buttonFrame
+		return btn
+	end
+	
+	local cancelBtn = createButton("Cancel", false)
+	local proceedBtn = createButton("Proceed", true)
+	
+	cancelBtn.MouseButton1Click:Connect(function()
+		decision = false
+		event:Fire()
+	end)
+	
+	proceedBtn.MouseButton1Click:Connect(function()
+		decision = true
+		event:Fire()
+	end)
+	
+	dialog.AncestryChanged:Connect(function()
+		if not dialog:IsDescendantOf(game) then
+			if decision == nil then
+				decision = false
+				event:Fire()
+			end
+		end
+	end)
+	
+	dialog:GetPropertyChangedSignal("Enabled"):Connect(function()
+		if not dialog.Enabled then
+			if decision == nil then
+				decision = false
+				event:Fire()
+			end
+		end
+	end)
+	
+	if decision == nil then
+		event.Event:Wait()
+	end
+	
+	dialog:Destroy()
+	return decision == true
 end
 
 --[=[
@@ -232,7 +408,7 @@ function AzulService.instanceToData(
 		})
 		data.properties = properties
 
-		local attributes = instance:GetAttributes()
+		local attributes = Serializer.collectSerializedAttributes(instance)
 		data.attributes = attributes
 
 		local tags = Serializer.collectSerializedTags(instance)
@@ -597,11 +773,10 @@ function AzulService.applySnapshotInstances(
 		end
 
 		if not instance then -- If we still don't have an existing instance, create it
-			local newInstance: Instance
+			local newInstance: Instance? = nil
 			if item.className == "MeshPart" then
 				local meshData = getMeshData(item.properties)
 				if meshData then
-					local content = Content.fromUri(meshData.meshId)
 					local okMesh, meshResult = pcall(
 						function()
 							return InsertService:CreateMeshPartAsync(
@@ -634,9 +809,10 @@ function AzulService.applySnapshotInstances(
 					)
 				end
 			end
-			newInstance.Name = adjustedPath[#adjustedPath]
-			newInstance.Parent = parent :: Instance
-			instance = newInstance
+			local resolvedNewInstance = newInstance :: Instance
+			resolvedNewInstance.Name = adjustedPath[#adjustedPath]
+			resolvedNewInstance.Parent = parent :: Instance
+			instance = resolvedNewInstance
 			created += 1
 		else
 			if parent and instance.Parent ~= parent and not AzulService.isProtectedRobloxContainer(instance) then

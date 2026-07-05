@@ -26,6 +26,10 @@ export class SyncDaemon {
   private batchDepth = 0; // Tracks nested batch processing
   private batchNeedsSourcemapRegen = false; // Defer regen until batch ends
   private stopPromise: Promise<void> | null = null;
+  // Coalesces sourcemap regeneration for bursts of filesystem mutations (e.g. a
+  // bulk `rm -rf` or a git branch switch) so we do at most one full rebuild.
+  private fsRegenTimer: NodeJS.Timeout | null = null;
+  private fsRegenPending = false;
 
   constructor() {
     this.tree = new TreeManager();
@@ -354,6 +358,12 @@ export class SyncDaemon {
 
       log.info(`File deleted externally: ${path.relative(this.fileWriter.getBaseDir(), filePath)}`);
 
+      // Capture path/class before removing the node so we can prune the
+      // sourcemap incrementally instead of doing a full O(n) rebuild per delete.
+      const prunePathSegments = [...node.path];
+      const prunedClassName = node.className;
+      const prunedGuid = node.guid;
+
       // Remove from local tree
       this.tree.deleteInstance(guid);
 
@@ -366,8 +376,20 @@ export class SyncDaemon {
         data: { guid },
       });
 
-      // Regenerate sourcemap
-      this.regenerateSourcemap();
+      // Incrementally prune the removed subtree from the sourcemap. Only fall
+      // back to a (coalesced) full regeneration if the targeted prune misses,
+      // which keeps bulk deletes from being quadratic.
+      const pruned = this.sourcemapGenerator.prunePath(
+        prunePathSegments,
+        config.sourcemapPath,
+        this.tree.getAllNodes(),
+        this.fileWriter.getAllMappings(),
+        prunedClassName,
+        prunedGuid,
+      );
+      if (!pruned) {
+        this.scheduleDeferredSourcemapRegen();
+      }
       this.fileWriter.cleanupEmptyDirectories();
     } else if (eventType === "change" && guid) {
       log.info(
@@ -518,6 +540,27 @@ export class SyncDaemon {
   }
 
   /**
+   * Coalesce a full sourcemap regeneration across a burst of filesystem
+   * mutations. Used as the fallback when an incremental prune misses, so a bulk
+   * delete performs a single rebuild instead of one per file (which is O(n^2)).
+   */
+  private scheduleDeferredSourcemapRegen(): void {
+    this.fsRegenPending = true;
+    if (this.fsRegenTimer) {
+      return;
+    }
+    this.fsRegenTimer = setTimeout(() => {
+      this.fsRegenTimer = null;
+      if (!this.fsRegenPending) {
+        return;
+      }
+      this.fsRegenPending = false;
+      log.debug("Running coalesced sourcemap regeneration after filesystem burst");
+      this.regenerateSourcemap();
+    }, Math.max(config.fileWatchDebounce, 100));
+  }
+
+  /**
    * Start the daemon
    */
   public start(): void {
@@ -539,6 +582,11 @@ export class SyncDaemon {
 
     this.stopPromise = (async () => {
       log.info("Stopping daemon...");
+      if (this.fsRegenTimer) {
+        clearTimeout(this.fsRegenTimer);
+        this.fsRegenTimer = null;
+        this.fsRegenPending = false;
+      }
       await this.fileWatcher.stop();
       this.ipc.send({ type: "daemonDisconnect" });
       await new Promise((resolve) => setTimeout(resolve, 50));

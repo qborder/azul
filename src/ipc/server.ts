@@ -4,6 +4,8 @@ import type { StudioMessage, DaemonMessage } from "./messages.js";
 import type { SnapshotRequestOptions } from "./messages.js";
 import type { Server as HttpServer } from "http";
 import { config } from "../config.js";
+import { PROTOCOL_VERSION, DEFAULT_CAPABILITIES } from "./protocol.js";
+import { getCurrentVersion } from "../util/versionUtils.js";
 
 export type MessageHandler = (message: StudioMessage) => void;
 
@@ -21,6 +23,7 @@ export class IPCServer {
   private requestSnapshotOnConnect: boolean;
   private pingIntervals = new Map<WebSocket, NodeJS.Timeout>();
   private handshakeComplete = false;
+  private remoteProtocolVersion: number | null = null;
 
   constructor(port?: number, server?: HttpServer, options?: IPCServerOptions) {
     this.requestSnapshotOnConnect = options?.requestSnapshotOnConnect !== false;
@@ -72,9 +75,41 @@ export class IPCServer {
                 this.handshakeHandler();
               }
             }
+
+            // Log version/protocol details and warn (never block) on a mismatch.
+            const remoteProtocol = (message as any).protocolVersion;
+            this.remoteProtocolVersion = typeof remoteProtocol === "number" ? remoteProtocol : null;
+            const remotePluginVersion = (message as any).pluginVersion;
+            if (
+              typeof remoteProtocol === "number" &&
+              remoteProtocol !== PROTOCOL_VERSION
+            ) {
+              log.warn(
+                `Protocol version mismatch: daemon speaks v${PROTOCOL_VERSION}, plugin speaks v${remoteProtocol}. ` +
+                  "Some features may be unavailable; update whichever side is older.",
+              );
+            } else {
+              log.debug(
+                `Handshake from plugin (protocol v${remoteProtocol ?? "?"}, plugin version ${remotePluginVersion ?? "?"})`,
+              );
+            }
+
+            let daemonVersion = "unknown";
+            try {
+              daemonVersion = getCurrentVersion();
+            } catch {
+              // Non-fatal: version is display-only.
+            }
+
             this.send({
               type: "handshakeAck",
               extraClassSuffixes: config.extraClassSuffixes,
+              protocolVersion: PROTOCOL_VERSION,
+              daemonVersion,
+              capabilities: {
+                msgpack: DEFAULT_CAPABILITIES.msgpack,
+                compression: DEFAULT_CAPABILITIES.compression,
+              },
             });
             return;
           }
@@ -229,6 +264,13 @@ export class IPCServer {
    */
   public isConnected(): boolean {
     return this.client !== null && this.client.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Get the protocol version of the connected plugin client
+   */
+  public getRemoteProtocolVersion(): number | null {
+    return this.remoteProtocolVersion;
   }
 
   /**

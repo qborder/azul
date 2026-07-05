@@ -114,6 +114,28 @@ export class BuildCommand {
     log.info(`Waiting for Studio to connect on port ${config.port}...`);
 
     await new Promise<void>((resolve) => {
+      let ackTimeout: NodeJS.Timeout | null = null;
+      const cleanClose = () => {
+        if (ackTimeout) {
+          clearTimeout(ackTimeout);
+          ackTimeout = null;
+        }
+        this.ipc.close();
+        resolve();
+      };
+
+      this.ipc.onMessage((message) => {
+        if (message.type === "applied" && message.operation === "build") {
+          log.success(
+            `Build applied successfully: ${message.created ?? 0} created, ${message.updated ?? 0} updated`,
+          );
+          cleanClose();
+        } else if (message.type === "rejected" && message.operation === "build") {
+          log.warn(`Build rejected: ${message.reason ?? "unknown reason"}`);
+          cleanClose();
+        }
+      });
+
       this.ipc.onConnection(() => {
         log.info("Studio connected. Waiting for handshake...");
       });
@@ -124,12 +146,21 @@ export class BuildCommand {
           type: "buildSnapshot",
           data: instances,
           destructive: this.destructive,
+          reason: this.destructive ? "Destructive build" : "Build command",
         });
         log.success(`Sent ${instances.length} instances`);
-        setTimeout(() => {
-          this.ipc.close();
-          resolve();
-        }, 200);
+
+        const remoteVersion = this.ipc.getRemoteProtocolVersion();
+        if (remoteVersion !== null && remoteVersion >= 1) {
+          log.info("Waiting for Studio to apply build snapshot...");
+          ackTimeout = setTimeout(() => {
+            log.warn("Timed out waiting for Studio build ack.");
+            cleanClose();
+          }, 60000);
+        } else {
+          // Fall back to simple delay for backwards compatibility
+          setTimeout(cleanClose, 200);
+        }
       });
     });
   }

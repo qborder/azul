@@ -25,6 +25,7 @@ local Children = Fusion.Children
 local ForPairs = Fusion.ForPairs
 local cleanup = Fusion.cleanup
 local peek = Fusion.peek
+local Ref = Fusion.Ref
 
 local CLASS_OPTIONS = {
 	"RemoteEvent",
@@ -87,7 +88,7 @@ return function(props: Props): Frame
 					Selected = function(option)
 						currentClass:set(option)
 						local copy = {}
-						for k, v in peek(suffixes) do
+						for k, v in pairs(peek(suffixes)) do
 							copy[k] = v
 						end
 						copy[suffixKey] = option
@@ -100,7 +101,7 @@ return function(props: Props): Frame
 					Size = UDim2.fromOffset(Theme.CompSizeY.Medium, Theme.CompSizeY.Medium),
 					Activated = function()
 						local copy = {}
-						for k, v in peek(suffixes) do
+						for k, v in pairs(peek(suffixes)) do
 							if k ~= suffixKey then
 								copy[k] = v
 							end
@@ -123,7 +124,7 @@ return function(props: Props): Frame
 				AutomaticSize = Enum.AutomaticSize.Y,
 				[Children] = {
 					List({ Spacing = 6 }),
-					ForPairs(suffixes, function(suffixKey, className)
+					ForPairs(suffixes, function(use, suffixKey, className)
 						return suffixKey, renderRow(suffixKey, className)
 					end, cleanup),
 				},

@@ -82,20 +82,47 @@ export class PushCommand {
       ];
 
       await new Promise<void>((resolve) => {
-        const sendSnapshot = () => {
-          log.info("Handshake complete. Sending Rojo compatibility push...");
-          this.ipc.send({ type: "pushSnapshot", mappings: snapshotMappings });
-          setTimeout(() => {
-            this.ipc.close();
-            resolve();
-          }, 200);
+        let ackTimeout: NodeJS.Timeout | null = null;
+        const cleanClose = () => {
+          if (ackTimeout) {
+            clearTimeout(ackTimeout);
+            ackTimeout = null;
+          }
+          this.ipc.close();
+          resolve();
         };
+
+        this.ipc.onMessage((message) => {
+          if (message.type === "applied" && message.operation === "push") {
+            log.success(
+              `Push applied successfully: ${message.created ?? 0} created, ${message.updated ?? 0} updated`,
+            );
+            cleanClose();
+          } else if (message.type === "rejected" && message.operation === "push") {
+            log.warn(`Push rejected: ${message.reason ?? "unknown reason"}`);
+            cleanClose();
+          }
+        });
 
         this.ipc.onConnection(() => {
           log.info("Studio connected. Waiting for handshake...");
         });
 
-        this.ipc.onHandshake(sendSnapshot);
+        this.ipc.onHandshake(() => {
+          log.info("Handshake complete. Sending Rojo compatibility push...");
+          this.ipc.send({ type: "pushSnapshot", mappings: snapshotMappings });
+
+          const remoteVersion = this.ipc.getRemoteProtocolVersion();
+          if (remoteVersion !== null && remoteVersion >= 1) {
+            log.info("Waiting for Studio to apply push snapshot...");
+            ackTimeout = setTimeout(() => {
+              log.warn("Timed out waiting for Studio push ack.");
+              cleanClose();
+            }, 60000);
+          } else {
+            setTimeout(cleanClose, 200);
+          }
+        });
       });
       return;
     }
@@ -190,18 +217,14 @@ export class PushCommand {
               destSegments,
               mappingSourcemapPath!,
             )
-          : isSourceDirectory
-            ? await builder.build()
-            : await this.buildPushInstancesFromFile(sourcePath, destSegments);
+          : await builder.build();
 
         if (useFromSourcemap && !instances) {
           log.warn(
             `Could not derive sourcemap subtree for ${sourcePath}; falling back to filesystem snapshot.`,
           );
 
-          const fallback = isSourceDirectory
-            ? await builder.build()
-            : await this.buildPushInstancesFromFile(sourcePath, destSegments);
+          const fallback = await builder.build();
           if (!fallback) {
             log.error(
               `Could not build fallback snapshot for source path: ${sourcePath}`,
@@ -283,20 +306,47 @@ export class PushCommand {
     }
 
     await new Promise<void>((resolve) => {
-      const sendSnapshot = () => {
-        log.info("Handshake complete. Sending push snapshot...");
-        this.ipc.send({ type: "pushSnapshot", mappings: snapshotMappings });
-        setTimeout(() => {
-          this.ipc.close();
-          resolve();
-        }, 200);
+      let ackTimeout: NodeJS.Timeout | null = null;
+      const cleanClose = () => {
+        if (ackTimeout) {
+          clearTimeout(ackTimeout);
+          ackTimeout = null;
+        }
+        this.ipc.close();
+        resolve();
       };
+
+      this.ipc.onMessage((message) => {
+        if (message.type === "applied" && message.operation === "push") {
+          log.success(
+            `Push applied successfully: ${message.created ?? 0} created, ${message.updated ?? 0} updated`,
+          );
+          cleanClose();
+        } else if (message.type === "rejected" && message.operation === "push") {
+          log.warn(`Push rejected: ${message.reason ?? "unknown reason"}`);
+          cleanClose();
+        }
+      });
 
       this.ipc.onConnection(() => {
         log.info("Studio connected. Waiting for handshake...");
       });
 
-      this.ipc.onHandshake(sendSnapshot);
+      this.ipc.onHandshake(() => {
+        log.info("Handshake complete. Sending push snapshot...");
+        this.ipc.send({ type: "pushSnapshot", mappings: snapshotMappings });
+
+        const remoteVersion = this.ipc.getRemoteProtocolVersion();
+        if (remoteVersion !== null && remoteVersion >= 1) {
+          log.info("Waiting for Studio to apply push snapshot...");
+          ackTimeout = setTimeout(() => {
+            log.warn("Timed out waiting for Studio push ack.");
+            cleanClose();
+          }, 60000);
+        } else {
+          setTimeout(cleanClose, 200);
+        }
+      });
     });
   }
 

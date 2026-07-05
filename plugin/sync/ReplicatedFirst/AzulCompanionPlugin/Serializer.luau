@@ -918,17 +918,48 @@ function Serializer.applySerializedProperties(
 end
 
 --[=[
-	Applies serialized attributes to an instance by calling SetAttribute for each key-value pair in the attributes table.
+	Collects an instance's attributes, serializing each value so that Roblox
+	datatype attributes (Color3, Vector3, UDim2, NumberRange, etc.) survive the
+	JSON round-trip instead of being flattened into plain tables.
+	@param instance Instance - The instance to collect attributes from
+	@return { [string]: any } - A table mapping attribute names to serialized values
+]=]
+function Serializer.collectSerializedAttributes(instance: Instance): { [string]: any }
+	local serialized = {}
+
+	local ok, attributes = pcall(function()
+		return instance:GetAttributes()
+	end)
+	if not ok or type(attributes) ~= "table" then return serialized end
+
+	for key, value in pairs(attributes) do
+		-- Plain JSON scalars pass through unchanged; Roblox datatypes become
+		-- tagged tables via serializeValue.
+		serialized[key] = Serializer.serializeValue(value)
+	end
+
+	return serialized
+end
+
+--[=[
+	Applies serialized attributes to an instance, deserializing each value first
+	so tagged Roblox datatypes are restored to their proper types before
+	SetAttribute is called.
 	@param instance Instance - The instance to apply attributes to
-	@param attributes table? - A table mapping attribute names to their values
+	@param attributes table? - A table mapping attribute names to serialized values
 ]=]
 function Serializer.applySerializedAttributes(instance: Instance, attributes: { [string]: any }?)
 	if type(attributes) ~= "table" then return end
 
 	for key, value in pairs(attributes) do
-		pcall(function()
-			instance:SetAttribute(key, value)
-		end)
+		local deserialized = Serializer.deserializeValue(value)
+		-- Only set when we have a concrete value. A nil result means an unknown
+		-- serialized datatype; skip it rather than clearing the attribute.
+		if deserialized ~= nil then
+			pcall(function()
+				instance:SetAttribute(key, deserialized)
+			end)
+		end
 	end
 end
 

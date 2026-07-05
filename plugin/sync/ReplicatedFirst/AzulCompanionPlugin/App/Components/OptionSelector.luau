@@ -14,6 +14,7 @@ local isState = require(Util.isState)
 local Corner = require(Components.Corner)
 local List = require(Components.List)
 local Box = require(Components.Box)
+local Container = require(Components.Container)
 
 local New = Fusion.New
 local Value = Fusion.Value
@@ -24,6 +25,7 @@ local Children = Fusion.Children
 local ForValues = Fusion.ForValues
 local cleanup = Fusion.cleanup
 local peek = Fusion.peek
+local Spring = Fusion.Spring
 
 local BUTTON_COMPONENT_ONLY_PROPS = {
 	"Activated",
@@ -49,54 +51,24 @@ local function Button(props: ButtonProps): TextButton
 		Pressed = isPressed,
 	})
 
-	local color = animate(
-		Computed(function(use)
-			return use(props.IsSelected) and use(Theme.Colors.Brand) or use(Theme.Colors.Background)
-		end),
-		state
-	)
-
-	local children = if props.IsFirst
-		then {
-			Corner({}),
-			New("Frame")({
-				AnchorPoint = Vector2.new(1, 0),
-				Position = UDim2.fromScale(1, 0),
-				Size = UDim2.fromScale(0.1, 1),
-				BackgroundColor3 = color,
-				BorderSizePixel = 0,
-			}),
-		}
-		elseif props.IsLast then {
-			Corner({}),
-			New("Frame")({
-				Size = UDim2.fromScale(0.1, 1),
-				BackgroundColor3 = color,
-				BorderSizePixel = 0,
-			}),
-		}
-		else {}
-
-	if not props.IsFirst then
-		table.insert(
-			children,
-			New("Frame")({
-				Size = UDim2.new(0, Theme.BorderThickness, 1, 0),
-				BackgroundColor3 = Theme.Colors.Border,
-				BorderSizePixel = 0,
-			})
-		)
-	end
-
 	return Hydrate(New("TextButton")({
 		Size = UDim2.fromScale(1, 1),
 		FontFace = Theme.Fonts.Regular,
 		AutoButtonColor = false,
-		TextSize = Theme.TextSize.Large,
-		BackgroundColor3 = color,
-		TextColor3 = Computed(function(use)
-			return use(props.IsSelected) and use(Theme.Colors.TextBranded) or use(Theme.Colors.Text)
-		end),
+		TextSize = Theme.TextSize.Medium,
+		BackgroundTransparency = 1,
+		TextColor3 = animate(
+			Computed(function(use)
+				if use(props.IsSelected) then
+					return use(Theme.Colors.TextBranded)
+				elseif use(isHovered) then
+					return use(Theme.Colors.Text)
+				else
+					return use(Theme.Colors.TextDimmed)
+				end
+			end),
+			state
+		),
 		[OnEvent("InputBegan")] = function(input)
 			if input.UserInputType == Enum.UserInputType.MouseMovement then
 				isHovered:set(true)
@@ -114,7 +86,6 @@ local function Button(props: ButtonProps): TextButton
 		[OnEvent("Activated")] = function()
 			if props.Activated then props.Activated() end
 		end,
-		[Children] = children,
 	}))(stripProps(props, BUTTON_COMPONENT_ONLY_PROPS))
 end
 
@@ -134,32 +105,70 @@ type Props = {
 return function(props: Props): Frame
 	local value = isState(props.Value) and props.Value or Value(props.Value or props.Options[1])
 
+	local selectedIndex = Computed(function(use)
+		return table.find(props.Options, use(value)) or 1
+	end)
+
+	local animIndex = Spring(selectedIndex, 22, 0.8)
+
+	local slidingPosition = Computed(function(use)
+		local idx = use(animIndex)
+		return UDim2.fromScale((idx - 1) / #props.Options, 0)
+	end)
+
+	local slidingSize = UDim2.fromScale(1 / #props.Options, 1)
+
 	return Hydrate(Box({
 		Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Small),
 		AutomaticSize = Enum.AutomaticSize.None,
 		[Children] = {
-			List({
-				FillDirection = Enum.FillDirection.Horizontal,
-				HorizontalFlex = Enum.UIFlexAlignment.Fill,
-				Spacing = 0,
+			-- Sliding background layer
+			Container({
+				Size = UDim2.fromScale(1, 1),
+				ZIndex = 1,
+				[Children] = {
+					New("Frame")({
+						Size = slidingSize,
+						Position = slidingPosition,
+						BackgroundColor3 = Theme.Colors.Brand,
+						BorderSizePixel = 0,
+						[Children] = {
+							Corner({}),
+						},
+					}),
+				},
 			}),
-			ForValues(props.Options, function(_, option)
-				return Button({
-					Text = option,
-					IsSelected = Computed(function(use)
-						return use(value) == option
-					end),
-					Activated = function()
-						if option == peek(value) then return end
 
-						value:set(option)
+			-- Foreground buttons layer
+			Container({
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 1,
+				ZIndex = 2,
+				[Children] = {
+					List({
+						FillDirection = Enum.FillDirection.Horizontal,
+						HorizontalFlex = Enum.UIFlexAlignment.Fill,
+						Spacing = 0,
+					}),
+					ForValues(props.Options, function(_, option)
+						return Button({
+							Text = option,
+							IsSelected = Computed(function(use)
+								return use(value) == option
+							end),
+							Activated = function()
+								if option == peek(value) then return end
 
-						if props.Selected then props.Selected(option) end
-					end,
-					IsFirst = option == props.Options[1],
-					IsLast = option == props.Options[#props.Options],
-				})
-			end, cleanup),
+								value:set(option)
+
+								if props.Selected then props.Selected(option) end
+							end,
+							IsFirst = option == props.Options[1],
+							IsLast = option == props.Options[#props.Options],
+						})
+					end, cleanup),
+				},
+			}),
 		},
 	}))(stripProps(props, COMPONENT_ONLY_PROPS))
 end

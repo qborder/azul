@@ -45,7 +45,9 @@ export type StudioPayloadMessage =
   | PingMessage
   | ClientDisconnect
   | PushConfigMessage
-  | HandshakeMessageStudio;
+  | HandshakeMessageStudio
+  | AppliedMessage
+  | RejectedMessage;
 
 export interface BatchMessage {
   type: "batch";
@@ -94,13 +96,51 @@ export interface PushConfigMessage {
   config: PushConfig;
 }
 
+/**
+ * Studio → Daemon: acknowledges that a one-shot operation (build/push/pack)
+ * finished applying. Makes the daemon deterministic instead of racing a timer.
+ */
+export interface AppliedMessage {
+  type: "applied";
+  /** Correlates with the operation the daemon initiated. */
+  operation?: "build" | "push" | "pack" | "instanceUpdated" | string;
+  created?: number;
+  updated?: number;
+  message?: string;
+}
+
+/**
+ * Studio → Daemon: the plugin declined to apply an operation (e.g. the user
+ * cancelled a destructive/large change at the confirmation prompt). The daemon
+ * should treat this as a clean no-op, not an error.
+ */
+export interface RejectedMessage {
+  type: "rejected";
+  operation?: "build" | "push" | "pack" | string;
+  reason?: string;
+}
+
 export interface HandshakeAckMessage {
   type: "handshakeAck";
   extraClassSuffixes?: Record<string, string>;
+  /** Integer wire-protocol version of the daemon (see ipc/protocol.ts). */
+  protocolVersion?: number;
+  /** Human-readable daemon version (package.json), for display only. */
+  daemonVersion?: string;
+  /** Optional transport capabilities the daemon supports. */
+  capabilities?: { msgpack?: boolean; compression?: boolean };
+  /** Effective initial-sync priority the daemon will use on connect. */
+  initialSyncPriority?: "studio" | "filesystem" | "none";
 }
 
 export interface HandshakeMessageStudio {
   type: "handshakeStudio";
+  /** Integer wire-protocol version of the plugin (see AzulService). */
+  protocolVersion?: number;
+  /** Human-readable plugin version (AzulService.VERSION), for display only. */
+  pluginVersion?: number | string;
+  /** Optional transport capabilities the plugin supports. */
+  capabilities?: { msgpack?: boolean; compression?: boolean };
 }
 
 /**
@@ -147,6 +187,8 @@ export interface BuildSnapshotMessage {
   type: "buildSnapshot";
   data: InstanceData[];
   destructive?: boolean;
+  /** Human-readable reason shown in the plugin confirmation prompt. */
+  reason?: string;
 }
 
 export interface RequestPushConfigMessage {

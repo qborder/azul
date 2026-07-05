@@ -1,6 +1,6 @@
 local Enums = require("./Enums")
 
-configTable = {
+local configTable = {
 	WS_URL = "ws://localhost:8080",
 
 	--// Auto-Reconnect Settings
@@ -11,6 +11,14 @@ configTable = {
 	HEARTBEAT_INTERVAL = 30,
 	BATCH_IDLE_WINDOW = 0.1,
 	SCRIPT_CHANGE_DEBOUNCE = 0.35,
+
+	--// Safety: confirmation & data-loss guards
+	CONFIRM_DESTRUCTIVE = true, --// Prompt before destructive builds/pushes and large diffs
+	CHANGES_THRESHOLD = 5, --// Prompt when an incoming apply affects more than this many instances
+	DISPLAY_PROMPTS = "Always", --// "Always" | "Initial" | "Never"
+	KEEP_UNKNOWNS = false, --// Preserve Studio-only instances not present in an incoming snapshot
+	INITIAL_SYNC_PRIORITY = "Studio", --// "Studio" | "Filesystem" | "None" (see daemon)
+
 	LIST_TYPE = Enums.listType.WHITELIST, -- or BLACKLIST
 	extraClassSuffixes = {
 		[".remoteevent"] = "RemoteEvent",

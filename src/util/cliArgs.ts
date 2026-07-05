@@ -1,6 +1,14 @@
 import { config } from "../config.js";
 import { parseArgs } from "node:util";
 
+/**
+ * Flags that accept an OPTIONAL value: `--flag` (use implicit default) or
+ * `--flag=value` / `--flag value`. Add new optional-value flags here so the
+ * normalization logic in `ensureOptionalStringFlagValues` covers them in one
+ * place instead of being special-cased per flag.
+ */
+const OPTIONAL_VALUE_FLAGS = ["--from-sourcemap"] as const;
+
 export interface ParsedCliArgs {
   command: string | null;
 
@@ -31,7 +39,7 @@ export interface ParsedCliArgs {
 }
 
 export function parseCliArgs(argv: string[]): ParsedCliArgs {
-  const args = ensureOptionalStringFlagValues(argv, ["--from-sourcemap"]);
+  const args = ensureOptionalStringFlagValues(argv, OPTIONAL_VALUE_FLAGS);
 
   const { values, positionals } = parseArgs({
     args,
@@ -156,7 +164,7 @@ function getNumberOptionInRange(
 
 function ensureOptionalStringFlagValues(
   argv: string[],
-  flags: string[],
+  flags: readonly string[],
 ): string[] {
   const normalized: string[] = [];
 

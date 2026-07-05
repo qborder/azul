@@ -51,6 +51,8 @@ export type SyncSession = {
 	batchAccumulator: number,
 	serviceSet: { [string]: boolean },
 	handshakeComplete: boolean,
+	daemonVersion: (string | number)?,
+	daemonProtocolVersion: number?,
 
 	-- Methods
 	startSync: (self: SyncSession, suppressInfo: boolean?) -> (),
@@ -141,6 +143,9 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 	self.batchAccumulator = 0
 	self.serviceSet = {}
 	self.handshakeComplete = false
+	self.daemonVersion = nil
+	self.daemonProtocolVersion = nil
+	self._hasSyncedThisSession = false
 
 	-- Auto-connect helpers
 	self._autoConnectThread = nil
@@ -465,6 +470,10 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 			if AzulService.isProtectedRobloxContainer(child) then
 				continue
 			end
+			-- If KEEP_UNKNOWNS is true, preserve Studio-only instances that are not tracked
+			if self.config.KEEP_UNKNOWNS and not self.trackedInstances[child] then
+				continue
+			end
 			local ok, err = pcall(function()
 				child:Destroy()
 			end)
@@ -552,10 +561,10 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 			return
 		end
 
+		-- Use the cached GUID captured when the instance was first tracked.
+		-- Do NOT fall back to GetDebugId here: debug IDs of instances that are
+		-- currently being removed (DescendantRemoving) are unreliable.
 		local guid = self.trackedInstances[instance]
-		if not guid then
-			guid = instance:GetDebugId(0)
-		end
 		if not guid then
 			return
 		end
@@ -735,6 +744,28 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 	local function processMessage(message)
 		self:debugPrint("Processing message type:", message.type)
 
+		local function shouldPrompt(changeCount: number, isDestructive: boolean): boolean
+			local mode = self.config.DISPLAY_PROMPTS or "Always"
+			if mode == "Never" then
+				return false
+			end
+
+			local isInitial = not self._hasSyncedThisSession
+			if mode == "Initial" and not isInitial then
+				return false
+			end
+
+			if isDestructive and self.config.CONFIRM_DESTRUCTIVE then
+				return true
+			end
+
+			if changeCount > (self.config.CHANGES_THRESHOLD or 5) then
+				return true
+			end
+
+			return false
+		end
+
 		if message.type == "patchScript" then
 			self:debugPrint("Patch requested for GUID:", message.guid)
 			local instance = self.guidMap[message.guid]
@@ -744,14 +775,24 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 				self.lastPatchTime[message.guid] = tick()
 
 				self.applyingPatch = true
-				AzulService.setScriptSource(instance :: Script, message.source)
+				local okPatch, errPatch = AzulService.withRecording("AzulPatchScript", "Azul Patch Script", function()
+					AzulService.setScriptSource(instance :: Script, message.source)
+				end)
 
 				task.delay(0.2, function()
 					self.applyingPatch = false
 					setOutboundSuppressed(false)
 				end)
 
-				self:infoPrint("Updated script:", `{instance.Parent}.{instance.Name}`)
+				if okPatch then
+					self:infoPrint("Updated script:", `{instance.Parent}.{instance.Name}`)
+					sendMessage("applied", {
+						operation = "patchScript",
+						updated = 1,
+					})
+				else
+					warn("[Azul]: Failed to set script source for", tostring(instance), ":", errPatch)
+				end
 
 				task.delay(0.2, function()
 					task.wait(0.2)
@@ -772,24 +813,57 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 		elseif message.type == "buildSnapshot" then
 			implicitHandshake()
 			self:infoPrint("Applying build snapshot from daemon")
+
+			local changeCount = #(message.data or {})
+			local isDestructive = message.destructive == true
+
+			if shouldPrompt(changeCount, isDestructive) then
+				local reason = message.reason or (isDestructive and "Destructive build" or "Large snapshot")
+				local title = "Azul Build Confirmation"
+				local details = `Applying build snapshot from daemon:\n• {changeCount} changes\n• Destructive: {tostring(isDestructive)}\nReason: {reason}\n\nDo you want to proceed?`
+				
+				local confirmed = AzulService.promptConfirmation(self.plugin, title, details)
+				if not confirmed then
+					self:infoPrint("Build snapshot rejected by user")
+					sendMessage("rejected", {
+						operation = "build",
+						reason = "User rejected confirmation prompt",
+					})
+					task.delay(0.5, function()
+						self:stopSync()
+					end)
+					return
+				end
+			end
+
 			setOutboundSuppressed(true)
 
-			local ok, err = pcall(function()
+			local created, updated = 0, 0
+			local ok, err = AzulService.withRecording("AzulBuildSnapshot", "Azul Build Snapshot", function()
 				if message.destructive == true then
 					wipeBuildRoots(message.data or {})
 				end
 
-				local created, updated, appliedGuidMap = AzulService.applySnapshotInstances(message.data, nil, self.guidMap)
+				local c, u, appliedGuidMap = AzulService.applySnapshotInstances(message.data, nil, self.guidMap)
+				created = c
+				updated = u
 				for guid, instance in pairs(appliedGuidMap) do
 					self.guidMap[guid] = instance
 					self.trackedInstances[instance] = guid
 					attachListeners(instance)
 				end
+				self._hasSyncedThisSession = true
 				self:infoPrint(`Build snapshot applied ({created} created, {updated} updated)`)
 			end)
 
 			setOutboundSuppressed(false)
-			if not ok then
+			if ok then
+				sendMessage("applied", {
+					operation = "build",
+					created = created,
+					updated = updated,
+				})
+			else
 				warn("[Azul]: Error applying build snapshot: ", err)
 			end
 
@@ -799,9 +873,38 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 		elseif message.type == "pushSnapshot" then
 			implicitHandshake()
 			self:infoPrint("Applying push snapshot from daemon")
+
+			local totalChanges = 0
+			local isDestructive = false
+			for _, mapping in ipairs(message.mappings or {}) do
+				totalChanges += #(mapping.instances or {})
+				if mapping.destructive then
+					isDestructive = true
+				end
+			end
+
+			if shouldPrompt(totalChanges, isDestructive) then
+				local title = "Azul Push Confirmation"
+				local details = `Applying push snapshot from daemon:\n• {totalChanges} changes\n• Destructive: {tostring(isDestructive)}\n\nDo you want to proceed?`
+				
+				local confirmed = AzulService.promptConfirmation(self.plugin, title, details)
+				if not confirmed then
+					self:infoPrint("Push snapshot rejected by user")
+					sendMessage("rejected", {
+						operation = "push",
+						reason = "User rejected confirmation prompt",
+					})
+					task.delay(0.5, function()
+						self:stopSync()
+					end)
+					return
+				end
+			end
+
 			setOutboundSuppressed(true)
 
-			local ok, err = pcall(function()
+			local totalCreated, totalUpdated = 0, 0
+			local ok, err = AzulService.withRecording("AzulPushSnapshot", "Azul Push Snapshot", function()
 				for _, mapping in ipairs(message.mappings or {}) do
 					local destination = mapping.destination or {}
 					if #destination == 0 then
@@ -810,7 +913,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 					end
 
 					self:debugPrint(
-						`Destination for push snapshot: {table.concat(destination, "/")}, destructive: {tostring(
+						`Destination for push snapshot: {table.concat(destination, "/")} ({#(mapping.instances or {})} instances), destructive: {tostring(
 							mapping.destructive
 						)}`
 					)
@@ -822,6 +925,8 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 
 					local created, updated, appliedGuidMap =
 						AzulService.applySnapshotInstances(mapping.instances or {}, mapping.destination, self.guidMap)
+					totalCreated += created
+					totalUpdated += updated
 					for guid, instance in pairs(appliedGuidMap) do
 						self.guidMap[guid] = instance
 						self.trackedInstances[instance] = guid
@@ -831,11 +936,18 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 						`Push applied to {table.concat(destination, "/")} ({created} created, {updated} updated)`
 					)
 				end
+				self._hasSyncedThisSession = true
 			end)
 
 			setOutboundSuppressed(false)
-			if not ok then
-				warn("[Azul]: Error applying push snapshot", err)
+			if ok then
+				sendMessage("applied", {
+					operation = "push",
+					created = totalCreated,
+					updated = totalUpdated,
+				})
+			else
+				warn("[Azul]: Error applying push snapshot: ", err)
 			end
 
 			task.delay(0.5, function()
@@ -852,6 +964,55 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 					self.config.extraClassSuffixes = message.extraClassSuffixes
 					self:debugPrint("Updated extraClassSuffixes from handshakeAck")
 				end
+
+				-- Store daemon version for the UI and warn (never block) on a
+				-- protocol mismatch so the user knows to update one side.
+				self.daemonVersion = message.daemonVersion
+				self.daemonProtocolVersion = message.protocolVersion
+				if
+					type(message.protocolVersion) == "number"
+					and message.protocolVersion ~= AzulService.PROTOCOL_VERSION
+				then
+					warn(
+						`[Azul]: Protocol version mismatch - plugin speaks v{AzulService.PROTOCOL_VERSION}, `
+							.. `daemon speaks v{message.protocolVersion}. Some features may be unavailable; `
+							.. `update whichever side is older.`
+					)
+				else
+					self:debugPrint(
+						`Daemon version: {tostring(message.daemonVersion)} (protocol v{tostring(message.protocolVersion)})`
+					)
+				end
+
+				-- Verify expected Place ID and Game ID if set in place config
+				local placeConfig, _ = AzulService.readPushConfig(PUSH_CONFIG_PATH)
+				if placeConfig then
+					local expectedPlaceId = tonumber(placeConfig.expectedPlaceId)
+					local expectedGameId = tonumber(placeConfig.expectedGameId)
+
+					if expectedPlaceId and expectedPlaceId ~= game.PlaceId then
+						local title = "Azul Place-ID Mismatch"
+						local msg = `Expected Place ID: {expectedPlaceId}\nActual Place ID: {game.PlaceId}\n\nConnecting may sync and overwrite the wrong place.\n\nDo you still want to proceed?`
+						local confirmed = AzulService.promptConfirmation(self.plugin, title, msg)
+						if not confirmed then
+							self:infoPrint("Connection aborted due to Place ID mismatch")
+							self:stopSync()
+							return
+						end
+					end
+
+					if expectedGameId and expectedGameId ~= game.GameId then
+						local title = "Azul Game-ID Mismatch"
+						local msg = `Expected Game ID: {expectedGameId}\nActual Game ID: {game.GameId}\n\nConnecting may sync and overwrite the wrong game.\n\nDo you still want to proceed?`
+						local confirmed = AzulService.promptConfirmation(self.plugin, title, msg)
+						if not confirmed then
+							self:infoPrint("Connection aborted due to Game ID mismatch")
+							self:stopSync()
+							return
+						end
+					end
+				end
+
 				sendDaemonConfig()
 				if self.ui then
 					self.ui:UpdateHandshakeState(true)
@@ -927,7 +1088,14 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 
 		repeat
 			self:debugPrint(`Attempting handshake with daemon... (try {tries}/{HANDSHAKE_MAX_RETRIES})`)
-			sendMessage("handshakeStudio", {})
+			sendMessage("handshakeStudio", {
+				protocolVersion = AzulService.PROTOCOL_VERSION,
+				pluginVersion = AzulService.VERSION,
+				capabilities = {
+					msgpack = false,
+					compression = false,
+				},
+			})
 
 			local startTime = tick()
 			while tick() - startTime < HANDSHAKE_TIMEOUT do
@@ -947,7 +1115,16 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 				warn(`[Azul]: Handshake attempt {tries} failed, retrying...`)
 			end
 
-		--self.wsClient:reconnect()
+			-- Only retry while the socket is genuinely still open. Re-sending the
+			-- handshake on a live-but-slow socket is useful; reusing a dead socket is
+			-- not. If the connection dropped, fail fast so the caller tears down and
+			-- the auto-connect watchdog performs a clean reconnect with a fresh socket.
+			-- (We must NOT call wsClient:reconnect() here: it fires the disconnect
+			-- handler -> stopSync() and re-enters this handshake from the connect
+			-- handler, corrupting the session.)
+			if not self.syncEnabled or not self.wsClient or not self.wsClient.connected then
+				return false
+			end
 		until tries >= HANDSHAKE_MAX_RETRIES
 
 		return self.handshakeComplete
@@ -968,6 +1145,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 			self:infoPrint("Starting sync...")
 		end
 		self.syncEnabled = true
+		self._hasSyncedThisSession = false
 		self.batchingEnabled = false
 		self.batchFlushToken += 1
 
@@ -1132,6 +1310,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 		end
 		self.syncEnabled = false
 		self.handshakeComplete = false
+		self._hasSyncedThisSession = false
 
 		if self.ui then
 			self.ui:UpdateHandshakeState(false)

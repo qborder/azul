@@ -9,20 +9,9 @@ local Theme = require(App.Theme)
 local Assets = require(App.Assets)
 local animate = require(Util.animate)
 local stripProps = require(Util.stripProps)
-local getTextSize = require(Util.getTextSize)
 local getState = require(Util.getState)
-
-local function join(t1, t2)
-	local result = {}
-	for _, v in t1 do
-		table.insert(result, v)
-	end
-	for _, v in t2 do
-		table.insert(result, v)
-	end
-	return result
-end
 local isState = require(Util.isState)
+local getTextSize = require(Util.getTextSize)
 
 local Container = require(Components.Container)
 local Padding = require(Components.Padding)
@@ -63,6 +52,17 @@ type ButtonProps = {
 	[any]: any,
 }
 
+local function join(t1: { any }, t2: { any }): { any }
+	local res = {}
+	for _, v in ipairs(t1) do
+		table.insert(res, v)
+	end
+	for _, v in ipairs(t2) do
+		table.insert(res, v)
+	end
+	return res
+end
+
 local function Button(props: ButtonProps): TextButton
 	local isHovered = Value(false)
 	local isPressed = Value(false)
@@ -80,12 +80,11 @@ local function Button(props: ButtonProps): TextButton
 		state
 	)
 
-	-- Hide very minor hover flicker of the first button when the dropdown is expanded
 	local disconnect = Observer(state):onChange(function()
 		if props.IsFirst and not peek(props.IsFirst) then
-			local state = peek(state)
+			local st = peek(state)
 
-			if state == Enum.GuiState.Idle and lastState == Enum.GuiState.Press then
+			if st == Enum.GuiState.Idle and lastState == Enum.GuiState.Press then
 				task.defer(function()
 					if peek(props.IsFirst) then
 						color:setPosition(
@@ -95,7 +94,7 @@ local function Button(props: ButtonProps): TextButton
 				end)
 			end
 
-			lastState = state
+			lastState = st
 		end
 	end)
 
@@ -137,8 +136,8 @@ local function Button(props: ButtonProps): TextButton
 		[Children] = join(
 			{
 				Padding({
-					Padding = 6,
-					Vertical = false,
+					Left = 6,
+					Right = 6,
 				}),
 			},
 			if props.IsFirst
@@ -175,6 +174,7 @@ local COMPONENT_ONLY_PROPS = {
 	"Options",
 	"Value",
 	"Placeholder",
+	"IsOpen",
 }
 
 type Props = {
@@ -182,37 +182,46 @@ type Props = {
 	Options: { string },
 	Value: Fusion.CanBeState<string>?,
 	Placeholder: Fusion.CanBeState<string>?,
+	IsOpen: Fusion.Value<boolean>?,
 	[any]: any,
 }
 
-return function(props: Props): TextButton
+return function(props: Props): Frame
 	local value = isState(props.Value) and props.Value or Value(props.Value or props.Options[1])
 	local placeholder = isState(props.Placeholder) and props.Placeholder or Value(props.Placeholder or props.Options[1])
 
-	local isOpen = Value(false)
+	local isOpen = props.IsOpen or Value(false)
 	local anchor = Value(0)
 	local ref = Value(nil)
+
+	local zIndex = Computed(function(use)
+		return use(isOpen) and 10 or 1
+	end)
 
 	local size
 	do
 		local maxSize = Vector2.zero
 
-		for _, option in props.Options do
+		for _, option in ipairs(props.Options) do
 			local textSize = getTextSize(option)
 
-			if textSize.X > maxSize.X then maxSize = textSize end
+			if textSize.X > maxSize.X then
+				maxSize = textSize
+			end
 		end
 
 		size = UDim2.fromOffset(maxSize.X + 40, Theme.CompSizeY.Medium)
 	end
 
-	return Hydrate(Container({
-		AutomaticSize = Enum.AutomaticSize.None,
-		Size = size,
+	return Hydrate(New("Frame")({
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = props.Size or size,
+		ZIndex = zIndex,
 		[Children] = {
 			Padding({
-				Padding = 6,
-				Vertical = false,
+				Left = 6,
+				Right = 6,
 			}),
 			Image({
 				AnchorPoint = Vector2.new(1, 0.5),
@@ -236,16 +245,19 @@ return function(props: Props): TextButton
 			Box({
 				ClipsDescendants = true,
 				AutomaticSize = Enum.AutomaticSize.None,
+				ZIndex = zIndex,
 				Size = Spring(
 					Computed(function(use)
-						return UDim2.new(1, 12, use(isOpen) and #props.Options or 1, 0)
+						return UDim2.new(1, 0, use(isOpen) and #props.Options or 1, 0)
 					end),
 					40
 				),
 				AnchorPoint = Computed(function(use)
 					if use(isOpen) then
 						local index = table.find(props.Options, peek(value))
-						anchor:set((index - 1) / #props.Options)
+						if index then
+							anchor:set((index - 1) / #props.Options)
+						end
 					end
 
 					return Vector2.new(0.5, peek(anchor))
@@ -281,13 +293,20 @@ return function(props: Props): TextButton
 										local open = peek(isOpen)
 										isOpen:set(not open)
 
-										if not open then peek(ref):CaptureFocus() end
+										if not open then
+											local r = peek(ref)
+											if r then r:CaptureFocus() end
+										end
 
-										if not open or option == peek(value) then return end
+										if not open or option == peek(value) then
+											return
+										end
 
 										value:set(option)
 
-										if props.Selected then props.Selected(option) end
+										if props.Selected then
+											props.Selected(option)
+										end
 									end,
 									IsFirst = isFirst and isOpen or nil,
 									IsLast = option == props.Options[#props.Options],

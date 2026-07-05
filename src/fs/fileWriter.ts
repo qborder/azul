@@ -424,13 +424,8 @@ export class FileWriter {
    * Find the GUID that currently owns a file path, if any
    */
   private findGuidByFilePath(filePath: string): string | undefined {
-    const normalized = path.resolve(filePath);
-    for (const [guid, mapping] of this.fileMappings) {
-      if (path.resolve(mapping.filePath) === normalized) {
-        return guid;
-      }
-    }
-    return undefined;
+    // Use the reverse index for an O(1) lookup instead of scanning all mappings.
+    return this.pathToGuid.get(path.resolve(filePath));
   }
 
   /**

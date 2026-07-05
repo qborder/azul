@@ -41,6 +41,14 @@ export interface AzulConfig {
 
   /** Suffixes and class name mappings for specific non-script instances */
   extraClassSuffixes: Record<string, string>;
+
+  /**
+   * Which side wins the INITIAL reconcile when the plugin connects.
+   * - "studio":     Studio's snapshot overwrites the filesystem (default; today's behavior).
+   * - "filesystem": the local filesystem is reconciled INTO Studio on connect.
+   * - "none":       connect and track live only; no initial overwrite in either direction.
+   */
+  initialSyncPriority: "studio" | "filesystem" | "none";
 }
 
 export const defaultConfig: Readonly<AzulConfig> = {
@@ -59,6 +67,7 @@ export const defaultConfig: Readonly<AzulConfig> = {
     ".bindableevent": "BindableEvent",
     ".bindablefunction": "BindableFunction",
   },
+  initialSyncPriority: "studio",
 };
 
 export const config: AzulConfig = { ...defaultConfig };
@@ -201,6 +210,14 @@ function sanitizeConfig(input: Record<string, unknown>): Partial<AzulConfig> {
       }
     }
     sanitized.extraClassSuffixes = suffixes;
+  }
+
+  if (
+    input.initialSyncPriority === "studio" ||
+    input.initialSyncPriority === "filesystem" ||
+    input.initialSyncPriority === "none"
+  ) {
+    sanitized.initialSyncPriority = input.initialSyncPriority;
   }
 
   return sanitized;

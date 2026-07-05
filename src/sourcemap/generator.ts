@@ -415,34 +415,50 @@ export class SourcemapGenerator {
     ): boolean => {
       if (!nodes) return false;
       const name = pathSegments[idx];
-      let nodeIndex = nodes.findIndex((n) => {
-        if (n.name !== name) return false;
-        if (idx === pathSegments.length - 1) {
-          if (targetGuid && (n as any).guid) {
-            return (n as any).guid === targetGuid;
-          }
-          if (targetClassName) {
-            return n.className === targetClassName;
-          }
-        }
-        return true;
-      });
+      const isTerminal = idx === pathSegments.length - 1;
 
-      // Fallback to name-only match so we still prune even if class drifted
-      if (nodeIndex === -1 && idx === pathSegments.length - 1) {
+      let nodeIndex = -1;
+
+      if (isTerminal) {
+        // Prefer a strict GUID match: it uniquely identifies the instance even
+        // when same-name siblings exist. This avoids pruning the wrong sibling.
         if (targetGuid) {
           nodeIndex = nodes.findIndex((n) => (n as any).guid === targetGuid);
+
+          // If any sibling at this level carries a GUID but none match the
+          // target, we must NOT fall back to name matching (that could delete
+          // an unrelated same-name sibling). Report a miss so the caller can
+          // safely rebuild.
+          if (nodeIndex === -1) {
+            const anyGuidPresent = nodes.some((n) => Boolean((n as any).guid));
+            if (anyGuidPresent) {
+              return false;
+            }
+          }
         }
+
+        // No GUID available (older sourcemap entries) — fall back to name and,
+        // when possible, class matching.
         if (nodeIndex === -1) {
-          nodeIndex = nodes.findIndex((n) => n.name === name);
+          if (targetClassName) {
+            nodeIndex = nodes.findIndex(
+              (n) => n.name === name && n.className === targetClassName,
+            );
+          }
+          if (nodeIndex === -1) {
+            nodeIndex = nodes.findIndex((n) => n.name === name);
+          }
         }
+      } else {
+        // Intermediate ancestor: match by name (path descent).
+        nodeIndex = nodes.findIndex((n) => n.name === name);
       }
 
       if (nodeIndex === -1) return false;
 
       const node = nodes[nodeIndex];
 
-      if (idx === pathSegments.length - 1) {
+      if (isTerminal) {
         // Remove the entire subtree
         nodes.splice(nodeIndex, 1);
         return true;
