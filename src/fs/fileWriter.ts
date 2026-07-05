@@ -27,7 +27,8 @@ export class FileWriter {
   }
 
   /**
-   * Write all script nodes to the filesystem
+  /**
+   * Write all syncable nodes to the filesystem
    */
   public writeTree(nodes: Map<string, TreeNode>): void {
     log.info("Writing tree to filesystem...");
@@ -36,21 +37,21 @@ export class FileWriter {
     this.fileMappings.clear();
     this.pathToGuid.clear();
 
-    // Collect all script nodes for batch writing
-    const scriptNodes: TreeNode[] = [];
+    // Collect all syncable nodes for batch writing
+    const syncableNodes: TreeNode[] = [];
     for (const node of nodes.values()) {
-      if (this.isScriptNode(node)) {
-        scriptNodes.push(node);
+      if (this.isSyncableNode(node)) {
+        syncableNodes.push(node);
       }
     }
 
-    this.writeBatch(scriptNodes);
+    this.writeBatch(syncableNodes);
 
-    log.success(`Wrote ${this.fileMappings.size} scripts to filesystem`);
+    log.success(`Wrote ${this.fileMappings.size} syncable nodes to filesystem`);
   }
 
   /**
-   * Write multiple scripts in a batch for improved I/O efficiency
+   * Write multiple syncables in a batch for improved I/O efficiency
    */
   public writeBatch(nodes: TreeNode[]): void {
     // Pre-compute all file paths and collect writes
@@ -58,9 +59,15 @@ export class FileWriter {
     const dirsToCreate = new Set<string>();
     const batchPathToGuid = new Map<string, string>();
 
+    const pathMap = new Map<string, TreeNode>();
     for (const node of nodes) {
-      if (!this.isScriptNode(node) || node.source === undefined) continue;
-      const filePath = this.getFilePathWithCollisionMap(node, batchPathToGuid);
+      pathMap.set(node.path.join("/"), node);
+    }
+
+    for (const node of nodes) {
+      if (!this.isSyncableNode(node)) continue;
+      if (this.isScriptNode(node) && node.source === undefined) continue;
+      const filePath = this.getFilePathWithCollisionMap(node, batchPathToGuid, pathMap);
       const dirPath = path.dirname(filePath);
       writes.push({ node, filePath, dirPath });
       dirsToCreate.add(dirPath);
@@ -77,7 +84,7 @@ export class FileWriter {
 
     for (const { node, filePath } of writes) {
       try {
-        fs.writeFileSync(filePath, node.source!, "utf-8");
+        this.writeSyncableNode(node, filePath);
 
         this.fileMappings.set(node.guid, {
           guid: node.guid,
@@ -88,26 +95,33 @@ export class FileWriter {
 
         log.script(this.getRelativePath(filePath), "updated");
       } catch (error) {
-        log.error(`Failed to write script ${filePath}:`, error);
+        log.error(`Failed to write syncable ${filePath}:`, error);
       }
     }
   }
 
   /**
-   * Write or update a single script
+   * Write or update a single syncable node
    */
-  public writeScript(node: TreeNode): string | null {
-    if (!this.isScriptNode(node)) {
+  public writeScript(node: TreeNode, allNodes?: Map<string, TreeNode>): string | null {
+    if (!this.isSyncableNode(node)) {
       return null;
     }
 
     // Allow empty-string sources on new scripts; only skip if source is truly undefined
-    if (node.source === undefined) {
+    if (this.isScriptNode(node) && node.source === undefined) {
       return null;
     }
 
+    const pathMap = new Map<string, TreeNode>();
+    if (allNodes) {
+      for (const n of allNodes.values()) {
+        pathMap.set(n.path.join("/"), n);
+      }
+    }
+
     const existingMapping = this.fileMappings.get(node.guid);
-    const filePath = this.getFilePath(node);
+    const filePath = this.getFilePathWithCollisionMap(node, undefined, pathMap);
     const dirPath = path.dirname(filePath);
     const previousPath = existingMapping?.filePath;
     const pathChanged = previousPath && previousPath !== filePath;
@@ -117,7 +131,7 @@ export class FileWriter {
 
     // Write file
     try {
-      fs.writeFileSync(filePath, node.source, "utf-8");
+      this.writeSyncableNode(node, filePath);
 
       // If the target path changed for this guid, remove the old file to avoid stale copies
       if (pathChanged && previousPath && fs.existsSync(previousPath)) {
@@ -137,7 +151,7 @@ export class FileWriter {
       log.script(this.getRelativePath(filePath), "updated");
       return filePath;
     } catch (error) {
-      log.error(`Failed to write script ${filePath}:`, error);
+      log.error(`Failed to write syncable ${filePath}:`, error);
       return null;
     }
   }
@@ -177,8 +191,14 @@ export class FileWriter {
   /**
    * Get the filesystem path for a node
    */
-  public getFilePath(node: TreeNode): string {
-    return this.getFilePathWithCollisionMap(node);
+  public getFilePath(node: TreeNode, allNodes?: Map<string, TreeNode>): string {
+    const pathMap = new Map<string, TreeNode>();
+    if (allNodes) {
+      for (const n of allNodes.values()) {
+        pathMap.set(n.path.join("/"), n);
+      }
+    }
+    return this.getFilePathWithCollisionMap(node, undefined, pathMap);
   }
 
   /**
@@ -187,27 +207,18 @@ export class FileWriter {
   private getFilePathWithCollisionMap(
     node: TreeNode,
     batchCollisionMap?: Map<string, string>,
+    pathMap?: Map<string, TreeNode>,
   ): string {
-    // Build the path from the node's hierarchy. For scripts, we only use the parent path
-    // as directories, then add the script file name. This prevents creating an extra
-    // folder named after the script itself.
-    const parts: string[] = [];
+    const isFile = this.isNodeFile(node);
+    let desiredPath: string;
 
-    const dirSegments = this.isScriptNode(node)
-      ? node.path.slice(0, Math.max(0, node.path.length - 1))
-      : node.path;
-
-    for (const segment of dirSegments) {
-      parts.push(this.sanitizeName(segment));
+    if (isFile) {
+      const fileName = this.getScriptFileName(node);
+      desiredPath = path.join(this.getDirectoryPath(node, pathMap), fileName);
+    } else {
+      desiredPath = path.join(this.getDirectoryPath(node, pathMap), "init.json");
     }
 
-    // If this is a script, add the script name as a file
-    if (this.isScriptNode(node)) {
-      const scriptName = this.getScriptFileName(node);
-      parts.push(scriptName);
-    }
-
-    const desiredPath = path.join(this.baseDir, ...parts);
     const normalizedDesiredPath = path.resolve(desiredPath);
 
     // Check for collisions in both the persistent mappings and the batch collision map
@@ -218,8 +229,14 @@ export class FileWriter {
     // If another GUID already owns this path, disambiguate using a stable suffix
     if (collision && collision !== node.guid) {
       const uniqueName = this.getDisambiguatedScriptFileName(node);
-      const uniqueParts = [...parts.slice(0, -1), uniqueName];
-      return path.join(this.baseDir, ...uniqueParts);
+      if (isFile) {
+        desiredPath = path.join(this.getDirectoryPath(node, pathMap), uniqueName);
+      } else {
+        desiredPath = path.join(
+          this.getDirectoryPath(node, pathMap) + `__${node.guid.slice(0, 8)}`,
+          "init.json",
+        );
+      }
     }
 
     return desiredPath;
@@ -229,46 +246,59 @@ export class FileWriter {
    * Get the appropriate filename for a script node
    */
   private getScriptFileName(node: TreeNode): string {
+    const suffix = this.getSuffixForClass(node.className);
+    if (suffix) {
+      return `${this.sanitizeName(node.name)}${suffix}`;
+    }
+
     const ext = config.scriptExtension;
-
-    // If the script has the same name as its parent, use init pattern
-    // const parentName = node.path[node.path.length - 2]; // 2 to get parent
-    // if (node.name === parentName) {
-    //   log.info(
-    //     `Using init file pattern for script ${node.name} because it matches its parent directory name (${parentName}).`
-    //   );
-    //   return `init${ext}`;
-    // }
-
     let name = this.sanitizeName(node.name);
 
-    if (node.className === "Script") {
-      name = `${name}.server`;
-    } else if (node.className === "LocalScript") {
-      name = `${name}.client`;
-    } else if (node.className === "ModuleScript") {
-      if (config.suffixModuleScripts) {
-        name = `${name}.module`;
+    const existingMapping = this.fileMappings.get(node.guid);
+    let existingSuffix = "";
+    if (existingMapping) {
+      const oldFileName = path.basename(existingMapping.filePath);
+      const base = oldFileName.replace(/\.luau$/i, "").replace(/\.lua$/i, "");
+      const match = base.match(/\.(server|client|module|legacy|local)$/);
+      if (match) {
+        existingSuffix = match[0];
+      }
+    }
+
+    if (existingSuffix) {
+      name = `${name}${existingSuffix}`;
+    } else {
+      if (node.className === "Script") {
+        name = `${name}.server`;
+      } else if (node.className === "LocalScript") {
+        name = `${name}.client`;
+      } else if (node.className === "ModuleScript") {
+        if (config.suffixModuleScripts) {
+          name = `${name}.module`;
+        }
       }
     }
 
     return `${name}${ext}`;
   }
 
-  /**
-   * Keep Script/LocalScript suffixes when disambiguating collisions.
-   */
   private getDisambiguatedScriptFileName(node: TreeNode): string {
     const baseFileName = this.getScriptFileName(node);
-    const ext = config.scriptExtension;
+    const suffix = this.getSuffixForClass(node.className);
     const guidSuffix = `__${node.guid.slice(0, 8)}`;
 
+    if (suffix) {
+      const stem = baseFileName.slice(0, -suffix.length);
+      return `${stem}${guidSuffix}${suffix}`;
+    }
+
+    const ext = config.scriptExtension;
     if (!baseFileName.endsWith(ext)) {
       return `${baseFileName}${guidSuffix}`;
     }
 
     const stem = baseFileName.slice(0, -ext.length);
-    const classSuffixMatch = stem.match(/(\.(?:server|client|module))$/);
+    const classSuffixMatch = stem.match(/(\.(?:server|client|module|legacy|local))$/);
     if (classSuffixMatch) {
       const classSuffix = classSuffixMatch[1];
       const rawName = stem.slice(0, -classSuffix.length);
@@ -297,6 +327,69 @@ export class FileWriter {
     );
   }
 
+  private isSyncableNode(node: TreeNode): boolean {
+    if (this.isScriptNode(node)) return true;
+    const classNameLower = node.className.toLowerCase();
+    return Object.values(config.extraClassSuffixes).some((val) => val.toLowerCase() === classNameLower);
+  }
+
+  private isNodeFile(node: TreeNode): boolean {
+    if (this.isScriptNode(node)) return true;
+    return node.children.size === 0;
+  }
+
+  private getSuffixForClass(className: string): string | undefined {
+    const classNameLower = className.toLowerCase();
+    for (const [suffix, val] of Object.entries(config.extraClassSuffixes)) {
+      if (val.toLowerCase() === classNameLower) {
+        return suffix;
+      }
+    }
+    return undefined;
+  }
+
+
+  private getDirectoryPath(
+    node: TreeNode,
+    pathMap?: Map<string, TreeNode>,
+  ): string {
+    const dirSegments = this.isNodeFile(node)
+      ? node.path.slice(0, Math.max(0, node.path.length - 1))
+      : node.path;
+
+    const parts: string[] = [];
+    const currentPath: string[] = [];
+
+    for (const segment of dirSegments) {
+      currentPath.push(segment);
+      const pathStr = currentPath.join("/");
+      const matchedNode = pathMap?.get(pathStr);
+      let suffix = "";
+      if (matchedNode) {
+        const classSuffix = this.getSuffixForClass(matchedNode.className);
+        if (classSuffix && matchedNode.children?.size > 0) {
+          suffix = classSuffix;
+        }
+      }
+      parts.push(this.sanitizeName(segment) + suffix);
+    }
+
+    return path.join(this.baseDir, ...parts);
+  }
+
+  private writeSyncableNode(node: TreeNode, filePath: string): void {
+    if (this.isScriptNode(node)) {
+      fs.writeFileSync(filePath, node.source || "", "utf-8");
+    } else {
+      const data = {
+        properties: node.properties || {},
+        attributes: node.attributes || {},
+        tags: node.tags || [],
+      };
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    }
+  }
+
   /**
    * Ensure a directory exists
    */
@@ -315,6 +408,7 @@ export class FileWriter {
     if (fs.existsSync(normalized)) {
       fs.unlinkSync(normalized);
       log.script(this.getRelativePath(normalized), "deleted");
+      this.cleanupParentsIfEmpty(path.dirname(normalized));
     }
 
     const guid = this.pathToGuid.get(normalized);
@@ -357,7 +451,21 @@ export class FileWriter {
    * Get GUID by file path
    */
   public getGuidByPath(filePath: string): string | undefined {
-    return this.pathToGuid.get(path.resolve(filePath));
+    const resolved = path.resolve(filePath);
+    const guid = this.pathToGuid.get(resolved);
+    if (guid) return guid;
+
+    const initJsonPath = path.resolve(filePath, "init.json");
+    const initGuid = this.pathToGuid.get(initJsonPath);
+    if (initGuid) return initGuid;
+
+    if (path.basename(resolved).toLowerCase() === "init.json") {
+      const parentDir = path.dirname(resolved);
+      const parentGuid = this.pathToGuid.get(parentDir);
+      if (parentGuid) return parentGuid;
+    }
+
+    return undefined;
   }
 
   /**

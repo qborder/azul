@@ -1,5 +1,6 @@
 import { InstanceData } from "../ipc/messages.js";
 import { log } from "../util/log.js";
+import { config } from "../config.js";
 
 /**
  * Represents a node in the virtual DataModel tree
@@ -13,6 +14,9 @@ export interface TreeNode {
   source?: string;
   children: Map<string, TreeNode>;
   parent?: TreeNode;
+  properties?: Record<string, unknown>;
+  attributes?: Record<string, unknown>;
+  tags?: string[];
 }
 
 /**
@@ -111,6 +115,13 @@ export class TreeManager {
       existing.path = instance.path;
       existing.parentGuid = nextParentGuid;
       existing.source = nextSource;
+      existing.properties = instance.properties !== undefined
+        ? (Array.isArray(instance.properties) && instance.properties.length === 0 ? {} : instance.properties)
+        : existing.properties;
+      existing.attributes = instance.attributes !== undefined
+        ? (Array.isArray(instance.attributes) && instance.attributes.length === 0 ? {} : instance.attributes)
+        : existing.attributes;
+      existing.tags = instance.tags !== undefined ? instance.tags : existing.tags;
 
       if (pathChanged || nameChanged || parentChanged) {
         this.reparentNode(existing, instance.path, nextParentGuid);
@@ -138,6 +149,13 @@ export class TreeManager {
       parentGuid: incomingParentGuid,
       source: instance.source,
       children: new Map(),
+      properties: instance.properties !== undefined
+        ? (Array.isArray(instance.properties) && instance.properties.length === 0 ? {} : instance.properties)
+        : undefined,
+      attributes: instance.attributes !== undefined
+        ? (Array.isArray(instance.attributes) && instance.attributes.length === 0 ? {} : instance.attributes)
+        : undefined,
+      tags: instance.tags,
     };
 
     this.nodes.set(instance.guid, node);
@@ -176,6 +194,9 @@ export class TreeManager {
         parentGuid: instance.parentGuid ?? null,
         source: instance.source,
         children: new Map(),
+        properties: instance.properties,
+        attributes: instance.attributes,
+        tags: instance.tags,
       };
       this.nodes.set(instance.guid, node);
       this.addToPathIndex(node);
@@ -279,6 +300,36 @@ export class TreeManager {
       node.className === "LocalScript" ||
       node.className === "ModuleScript"
     );
+  }
+
+  public isSyncableNode(node: TreeNode): boolean {
+    if (this.isScriptNode(node)) return true;
+    const classNameLower = node.className.toLowerCase();
+    return Object.values(config.extraClassSuffixes).some((val) => val.toLowerCase() === classNameLower);
+  }
+
+  public getDescendantSyncableNodes(guid: string): TreeNode[] {
+    const start = this.nodes.get(guid);
+    if (!start) {
+      return [];
+    }
+
+    const syncable: TreeNode[] = [];
+    const stack: TreeNode[] = [...start.children.values()];
+
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+
+      if (this.isSyncableNode(node)) {
+        syncable.push(node);
+      }
+
+      for (const child of node.children.values()) {
+        stack.push(child);
+      }
+    }
+
+    return syncable;
   }
 
   private pathsEqual(a: string[], b: string[]): boolean {

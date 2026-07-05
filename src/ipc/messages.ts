@@ -96,6 +96,7 @@ export interface PushConfigMessage {
 
 export interface HandshakeAckMessage {
   type: "handshakeAck";
+  extraClassSuffixes?: Record<string, string>;
 }
 
 export interface HandshakeMessageStudio {

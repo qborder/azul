@@ -8,6 +8,7 @@ export type FileChangeHandler = (
   eventType: "add" | "change" | "unlink",
   filePath: string,
   source?: string,
+  extraData?: { properties?: any; attributes?: any; tags?: any },
 ) => void;
 
 /**
@@ -52,6 +53,14 @@ export class FileWatcher {
       this.handleFileUnlink(filePath);
     });
 
+    this.watcher.on("addDir", (dirPath) => {
+      this.handleDirectoryEvent("add", dirPath);
+    });
+
+    this.watcher.on("unlinkDir", (dirPath) => {
+      this.handleDirectoryUnlink(dirPath);
+    });
+
     this.watcher.on("error", (error) => {
       log.error("File watcher error:", error);
     });
@@ -86,7 +95,7 @@ export class FileWatcher {
   private processFileEvent(eventType: "add" | "change", filePath: string): void {
     const normalizedPath = path.resolve(filePath);
 
-    // Only process script files
+    // Only process script or extra class files
     if (!this.isScriptFile(filePath)) {
       return;
     }
@@ -95,12 +104,27 @@ export class FileWatcher {
       if (!fs.existsSync(normalizedPath)) {
         return;
       }
-      const source = fs.readFileSync(filePath, "utf-8");
+
+      let source: string | undefined = undefined;
+      let extraData: { properties?: any; attributes?: any; tags?: any } | undefined = undefined;
+
+      const isScript = filePath.endsWith(".lua") || filePath.endsWith(".luau");
+      if (isScript) {
+        source = fs.readFileSync(filePath, "utf-8");
+      } else {
+        const raw = fs.readFileSync(filePath, "utf-8");
+        try {
+          extraData = JSON.parse(raw);
+        } catch (error) {
+          log.warn(`Failed to parse JSON file ${filePath}:`, error);
+        }
+      }
 
       // Skip if this change was produced by a Studio-originated write.
       const expectedSource = this.expectedContents.get(normalizedPath);
       if (expectedSource !== undefined) {
-        if (source === expectedSource) {
+        const matches = isScript ? source === expectedSource : fs.readFileSync(filePath, "utf-8") === expectedSource;
+        if (matches) {
           log.debug(
             `File ${eventType} suppressed (Studio-originated content match): ${normalizedPath}`,
           );
@@ -133,7 +157,7 @@ export class FileWatcher {
       log.debug(`File ${eventType}d: ${normalizedPath}`);
 
       if (this.changeHandler) {
-        this.changeHandler(eventType, normalizedPath, source);
+        this.changeHandler(eventType, normalizedPath, source, extraData);
       }
     } catch (error) {
       log.error(`Failed to read ${eventType}d file ${filePath}:`, error);
@@ -184,8 +208,91 @@ export class FileWatcher {
   /**
    * Check if a file is a script file
    */
+  private handleDirectoryEvent(eventType: "add", dirPath: string): void {
+    const lower = dirPath.toLowerCase();
+    let isExtraClassDir = false;
+    for (const suffix of Object.keys(config.extraClassSuffixes)) {
+      if (lower.endsWith(suffix.toLowerCase())) {
+        isExtraClassDir = true;
+        break;
+      }
+    }
+
+    if (!isExtraClassDir) return;
+
+    const existingTimer = this.debounceTimers.get(dirPath);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(() => {
+      this.processDirectoryEvent(eventType, dirPath);
+      this.debounceTimers.delete(dirPath);
+    }, config.fileWatchDebounce);
+
+    this.debounceTimers.set(dirPath, timer);
+  }
+
+  private processDirectoryEvent(eventType: "add", dirPath: string): void {
+    const normalizedPath = path.resolve(dirPath);
+    const initJsonPath = path.join(normalizedPath, "init.json");
+    let extraData: any = undefined;
+    if (fs.existsSync(initJsonPath)) {
+      try {
+        extraData = JSON.parse(fs.readFileSync(initJsonPath, "utf-8"));
+      } catch (error) {
+        log.warn(`Failed to parse init.json in directory ${dirPath}:`, error);
+      }
+    }
+
+    log.debug(`Directory ${eventType}d: ${normalizedPath}`);
+
+    if (this.changeHandler) {
+      this.changeHandler(eventType, normalizedPath, undefined, extraData);
+    }
+  }
+
+  private handleDirectoryUnlink(dirPath: string): void {
+    const existingTimer = this.debounceTimers.get(dirPath);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      this.debounceTimers.delete(dirPath);
+    }
+
+    const normalizedPath = path.resolve(dirPath);
+
+    let isExtraClassDir = false;
+    const lower = dirPath.toLowerCase();
+    for (const suffix of Object.keys(config.extraClassSuffixes)) {
+      if (lower.endsWith(suffix.toLowerCase())) {
+        isExtraClassDir = true;
+        break;
+      }
+    }
+
+    if (!isExtraClassDir) return;
+
+    log.debug(`Directory unlinked: ${normalizedPath}`);
+
+    if (this.changeHandler) {
+      this.changeHandler("unlink", normalizedPath);
+    }
+  }
+
   private isScriptFile(filePath: string): boolean {
-    return filePath.endsWith(".lua") || filePath.endsWith(".luau");
+    const lower = filePath.toLowerCase();
+    if (lower.endsWith(".lua") || lower.endsWith(".luau")) {
+      return true;
+    }
+    for (const suffix of Object.keys(config.extraClassSuffixes)) {
+      if (lower.endsWith(suffix.toLowerCase())) {
+        return true;
+      }
+    }
+    if (path.basename(lower) === "init.json") {
+      return true;
+    }
+    return false;
   }
 
   /**

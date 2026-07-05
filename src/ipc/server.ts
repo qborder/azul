@@ -3,6 +3,7 @@ import { log } from "../util/log.js";
 import type { StudioMessage, DaemonMessage } from "./messages.js";
 import type { SnapshotRequestOptions } from "./messages.js";
 import type { Server as HttpServer } from "http";
+import { config } from "../config.js";
 
 export type MessageHandler = (message: StudioMessage) => void;
 
@@ -16,6 +17,7 @@ export class IPCServer {
   private messageHandler: MessageHandler | null = null;
   private connectionHandler: (() => void) | null = null;
   private handshakeHandler: (() => void) | null = null;
+  private disconnectHandler: (() => void) | null = null;
   private requestSnapshotOnConnect: boolean;
   private pingIntervals = new Map<WebSocket, NodeJS.Timeout>();
   private handshakeComplete = false;
@@ -32,7 +34,7 @@ export class IPCServer {
     } else {
       // Create standalone WebSocket server
       this.wss = new WebSocketServer({
-        port: port || 8080,
+        port: port !== undefined ? port : 8080,
         // perMessageDeflate: false, // avoid RSV2/RSV3 bits from compression
         maxPayload: 256 * 1024 * 1024, // 256 MB
       });
@@ -70,7 +72,10 @@ export class IPCServer {
                 this.handshakeHandler();
               }
             }
-            this.send({ type: "handshakeAck" });
+            this.send({
+              type: "handshakeAck",
+              extraClassSuffixes: config.extraClassSuffixes,
+            });
             return;
           }
 
@@ -93,6 +98,10 @@ export class IPCServer {
         log.info("Studio client disconnected");
         this.client = null;
         this.handshakeComplete = false;
+
+        if (this.disconnectHandler) {
+          this.disconnectHandler();
+        }
       });
 
       ws.on("error", (error) => {
@@ -156,6 +165,13 @@ export class IPCServer {
     if (this.handshakeComplete) {
       handler();
     }
+  }
+
+  /**
+   * Register a handler that fires when a Studio client disconnects
+   */
+  public onDisconnect(handler: () => void): void {
+    this.disconnectHandler = handler;
   }
 
   /**

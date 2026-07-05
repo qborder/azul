@@ -30,6 +30,8 @@ local Box = require("./Components/Box")
 local IconButton = require("./Components/IconButton")
 local Assets = require("./Assets")
 local Collapsible = require("./Components/Collapsible")
+local Switch = require("./Components/Switch")
+local SuffixEditor = require("./Components/SuffixEditor")
 
 local Value = fusion.Value
 local Computed = fusion.Computed
@@ -38,6 +40,10 @@ local OnEvent = fusion.OnEvent
 local Ref = fusion.Ref
 local Observer = fusion.Observer
 local peek = fusion.peek
+local Spring = fusion.Spring
+local New = fusion.New
+local ForPairs = fusion.ForPairs
+local cleanup = fusion.cleanup
 
 UI.__index = UI
 
@@ -168,7 +174,7 @@ local function labeledToggle(label: string, value: fusion.Value<boolean>, change
 				VerticalAlignment = Enum.VerticalAlignment.Center,
 				Spacing = 8,
 			}),
-			Checkbox({
+			Switch({
 				Value = value,
 				Changed = changed,
 			}),
@@ -247,6 +253,7 @@ function UI.new(plugin, callbacks, settingsScope, helpers): AzulUI
 	self.silentMode = Value(Config.SILENT_MODE)
 	self.settingsScopeValue = Value(settingsScope == Enums.scope.GLOBAL and "Global" or "Project")
 	self.listTypeValue = Value(Config.LIST_TYPE == Enums.listType.WHITELIST and "Whitelist" or "Blacklist")
+	self.extraClassSuffixesValue = Value(Config.extraClassSuffixes)
 
 	self.wsUrlRef = Value(nil)
 	self.heartbeatRef = Value(nil)
@@ -276,11 +283,15 @@ function UI.new(plugin, callbacks, settingsScope, helpers): AzulUI
 
 	local function createSettingsWidget()
 		local settingsOpen = Value(true)
+		local TABS = { "General", "Sync", "Suffixes", "Tools" }
+		
+		local selectedTab = Value("General")
+
 		local widget = Widget({
 			Name = "Azul Settings",
 			Id = "AzulSettings",
-			MinimumSize = Vector2.new(300, 320),
-			FloatingSize = Vector2.new(350, 480),
+			MinimumSize = Vector2.new(320, 360),
+			FloatingSize = Vector2.new(360, 440),
 			InitialDockTo = Enum.InitialDockState.Float,
 			InitialEnabled = true,
 			Enabled = settingsOpen,
@@ -297,224 +308,284 @@ function UI.new(plugin, callbacks, settingsScope, helpers): AzulUI
 					BackgroundColor3 = Theme.Colors.Background,
 					BackgroundTransparency = 0,
 					[Children] = {
-						ScrollingContainer({
-							ScrollBar = true,
+						Padding({
+							Padding = Theme.WidgetPadding,
+						}),
+						List({
+							Spacing = Theme.ListSpacing,
+						}),
+
+						-- Category Tab Selector at the top (Exactly like Argon OptionSelector!)
+						OptionSelector({
+							Options = TABS,
+							Value = selectedTab,
+							Selected = function(option)
+								selectedTab:set(option)
+							end,
+						}),
+
+						-- Thin divider
+						New("Frame")({
+							Size = UDim2.new(1, 0, 0, Theme.BorderThickness),
+							BackgroundColor3 = Theme.Colors.Border,
+							BorderSizePixel = 0,
+						}),
+
+						-- Main content container (Crisp standard Frame)
+						Container({
+							Size = UDim2.new(1, 0, 1, -(Theme.CompSizeY.Small + Theme.ListSpacing + Theme.BorderThickness)),
 							[Children] = {
-								Padding {
-									Padding = Theme.WidgetPadding,
-								},
-								List({
-									Spacing = Theme.ListSpacing,
-								}),
+								ScrollingContainer({
+									ScrollBar = true,
+									[Children] = {
+										Padding({ Padding = 2 }),
+										List({ Spacing = Theme.ListSpacing }),
+										Computed(function(use)
+											local tab = use(selectedTab)
+											if tab == "General" then
+												return {
+													labeledToggle("Auto Connect", self.autoConnect, function(newValue)
+														Config.AUTO_CONNECT = newValue
+														if self.callbacks.onAutoConnectChanged then
+															self.callbacks.onAutoConnectChanged(newValue)
+														end
+													end),
+													infoText("Automatically attempts to connect to Daemon on startup."),
 
-								-- General Settings Collapsible
-								Collapsible({
-									Title = "General Settings",
-									Expanded = true,
-									Elements = {
-										Container({
-											Size = UDim2.new(1, 0, 0, 0),
-											AutomaticSize = Enum.AutomaticSize.Y,
-											[Children] = {
-												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
-												List({ Spacing = Theme.ListSpacing }),
+													labeledToggle("Silent Mode", self.silentMode, function(newValue)
+														Config.SILENT_MODE = newValue
+														if self.callbacks.onSilentModeChanged then
+															self.callbacks.onSilentModeChanged(newValue)
+														end
+													end),
+													infoText("Suppresses all console output except errors."),
 
-												labeledToggle("Auto Connect", self.autoConnect, function(newValue)
-													Config.AUTO_CONNECT = newValue
-													if self.callbacks.onAutoConnectChanged then
-														self.callbacks.onAutoConnectChanged(newValue)
-													end
-												end),
-												infoText("Automatically attempts to connect to Daemon on startup."),
+													labeledToggle("Debug Mode", self.debugMode, function(newValue)
+														Config.DEBUG_MODE = newValue
+														if self.callbacks.onDebugModeChanged then
+															self.callbacks.onDebugModeChanged(newValue)
+														end
+													end),
+													infoText("Enables verbose logging in the output console."),
 
-												labeledToggle("Silent Mode", self.silentMode, function(newValue)
-													Config.SILENT_MODE = newValue
-													if self.callbacks.onSilentModeChanged then
-														self.callbacks.onSilentModeChanged(newValue)
-													end
-												end),
-												infoText("Suppresses all console output except errors."),
+													Text({
+														Text = "Settings Scope",
+														TextSize = Theme.TextSize.Small,
+														Color = Theme.Colors.TextDimmed,
+														AutomaticSize = Enum.AutomaticSize.XY,
+													}),
+													OptionSelector({
+														Options = { "Global", "Project" },
+														Value = self.settingsScopeValue,
+														Selected = function(option)
+															local scope = option == "Global" and Enums.scope.GLOBAL or Enums.scope.PROJECT
+															self.callbacks.onSettingsScopeChanged(scope)
+														end,
+													}),
+												}
+											elseif tab == "Sync" then
+												return {
+													Text({
+														Text = "Connection Settings",
+														TextSize = Theme.TextSize.Medium,
+														FontFace = Theme.Fonts.Bold,
+														AutomaticSize = Enum.AutomaticSize.XY,
+													}),
+													labeledInput("Heartbeat Interval (seconds)", self.heartbeatRef, {
+														Text = tostring(Config.HEARTBEAT_INTERVAL),
+														Finished = function(text)
+															if text == "" then return end
+															validateNumberInput(text, function(value)
+																self.callbacks.onConfigChanged("HEARTBEAT_INTERVAL", value)
+															end)
+														end,
+													}),
+													labeledInput("Batch Idle Window (seconds)", self.batchIdleRef, {
+														Text = tostring(Config.BATCH_IDLE_WINDOW),
+														Finished = function(text)
+															if text == "" then return end
+															validateNumberInput(text, function(value)
+																self.callbacks.onConfigChanged("BATCH_IDLE_WINDOW", value)
+															end)
+														end,
+													}),
+													labeledInput("Script Change Debounce (seconds)", self.scriptDebounceRef, {
+														Text = tostring(Config.SCRIPT_CHANGE_DEBOUNCE),
+														Finished = function(text)
+															if text == "" then return end
+															validateNumberInput(text, function(value)
+																self.callbacks.onConfigChanged("SCRIPT_CHANGE_DEBOUNCE", value)
+															end)
+														end,
+													}),
+													labeledInput("Maximum Handshake Attempts", self.maxHandshakesRef, {
+														Text = tostring(Config.MAX_HANDSHAKES),
+														Finished = function(text)
+															if text == "" then return end
+															validateNumberInput(text, function(value)
+																self.callbacks.onConfigChanged("MAX_HANDSHAKES", value)
+															end)
+														end,
+													}),
+													labeledInput("Maximum Reconnection Attempts", self.maxReconnectionsRef, {
+														Text = tostring(Config.MAX_RECONNECTIONS),
+														Placeholder = "-1 for infinite attempts",
+														Finished = function(text)
+															if text == "" then return end
+															validateNumberInput(text, function(value)
+																self.callbacks.onConfigChanged("MAX_RECONNECTIONS", value)
+															end, true)
+														end,
+													}),
+													labeledInput("Reconnection Interval (seconds)", self.reconnectionIntervalRef, {
+														Text = tostring(Config.RECONNECTION_INTERVAL),
+														Finished = function(text)
+															if text == "" then return end
+															validateNumberInput(text, function(value)
+																self.callbacks.onConfigChanged("RECONNECTION_INTERVAL", value)
+															end)
+														end,
+													}),
+													New("Frame")({
+														Size = UDim2.new(1, 0, 0, Theme.BorderThickness),
+														BackgroundColor3 = Theme.Colors.Border,
+														BorderSizePixel = 0,
+													}),
+													Text({
+														Text = "Service Filters",
+														TextSize = Theme.TextSize.Medium,
+														FontFace = Theme.Fonts.Bold,
+														AutomaticSize = Enum.AutomaticSize.XY,
+													}),
+													Text({
+														Text = "List Type",
+														TextSize = Theme.TextSize.Small,
+														Color = Theme.Colors.TextDimmed,
+														AutomaticSize = Enum.AutomaticSize.XY,
+													}),
+													OptionSelector({
+														Options = { "Whitelist", "Blacklist" },
+														Value = self.listTypeValue,
+														Selected = function(option)
+															self.callbacks.onConfigChanged(
+																"LIST_TYPE",
+																option == "Whitelist" and Enums.listType.WHITELIST
+																	or Enums.listType.BLACKLIST
+															)
+														end,
+													}),
+													labeledInput("Service List (comma-separated)", self.serviceListRef, {
+														Text = table.concat(Config.SERVICE_LIST, ", "),
+														BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
+														Finished = function(text)
+															local items = AzulService.parseCommaSeparatedList(text)
+															self.callbacks.onConfigChanged("SERVICE_LIST", items)
+														end,
+													}),
+													labeledInput("Excluded Parents (comma-separated)", self.excludedParentsRef, {
+														Text = table.concat(Config.EXCLUDED_PARENTS, ", "),
+														BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
+														Finished = function(text)
+															local items = AzulService.parseCommaSeparatedList(text)
+															self.callbacks.onConfigChanged("EXCLUDED_PARENTS", items)
+														end,
+													}),
+												}
+											elseif tab == "Suffixes" then
+												return {
+													SuffixEditor({
+														Suffixes = self.extraClassSuffixesValue,
+														Changed = function(newTable)
+															self.extraClassSuffixesValue:set(newTable)
+															self.callbacks.onConfigChanged("extraClassSuffixes", newTable)
+														end,
+													}),
+												}
+											elseif tab == "Tools" then
+												return {
+													TextButton({
+														Text = "Reload Sourcemap",
+														Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
+														Activated = function()
+															self.callbacks.onSourcemapReload()
+														end,
+													}),
+													infoText("Force reload the sourcemap file from disk to reset the sync state."),
 
-												labeledToggle("Debug Mode", self.debugMode, function(newValue)
-													Config.DEBUG_MODE = newValue
-													if self.callbacks.onDebugModeChanged then
-														self.callbacks.onDebugModeChanged(newValue)
-													end
-												end),
-												infoText("Enables verbose logging in the output console."),
+													TextButton({
+														Text = "Open Place Configuration",
+														Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
+														Activated = function()
+															helpers.openPlaceConfig()
+														end,
+													}),
+													infoText("Open the per-place configuration script in ServerStorage."),
 
-												Text({
-													Text = "Settings Scope",
-													TextSize = Theme.TextSize.Small,
-													Color = Theme.Colors.TextDimmed,
-													AutomaticSize = Enum.AutomaticSize.XY,
-												}),
-												OptionSelector({
-													Options = { "Global", "Project" },
-													Value = self.settingsScopeValue,
-													Selected = function(option)
-														local scope = option == "Global" and Enums.scope.GLOBAL or Enums.scope.PROJECT
-														self.callbacks.onSettingsScopeChanged(scope)
-													end,
-												}),
-											}
-										})
-									},
-								}),
+													New("Frame")({
+														Size = UDim2.new(1, 0, 0, 1),
+														BackgroundColor3 = Theme.Colors.Border,
+														BorderSizePixel = 0,
+													}),
 
-								-- Connection Details Collapsible
-								Collapsible({
-									Title = "Connection Details",
-									Expanded = false,
-									Elements = {
-										Container({
-											Size = UDim2.new(1, 0, 0, 0),
-											AutomaticSize = Enum.AutomaticSize.Y,
-											[Children] = {
-												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
-												List({ Spacing = Theme.ListSpacing }),
+													TextButton({
+														Text = "Reset Current Tab Defaults",
+														Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
+														Activated = function()
+															Config.AUTO_CONNECT = false
+															Config.DEBUG_MODE = false
+															Config.SILENT_MODE = false
+															Config.HEARTBEAT_INTERVAL = 30
+															Config.BATCH_IDLE_WINDOW = 0.1
+															Config.SCRIPT_CHANGE_DEBOUNCE = 0.35
+															Config.MAX_HANDSHAKES = 5
+															Config.MAX_RECONNECTIONS = -1
+															Config.RECONNECTION_INTERVAL = 5
+															Config.LIST_TYPE = Enums.listType.WHITELIST
+															Config.SERVICE_LIST = {
+																"Workspace",
+																"Lighting",
+																"ReplicatedFirst",
+																"ReplicatedStorage",
+																"ServerScriptService",
+																"ServerStorage",
+																"StarterGui",
+																"StarterPack",
+																"StarterPlayer",
+																"SoundService",
+															}
+															Config.EXCLUDED_PARENTS = {
+																"ServerStorage.RecPlugins",
+																"Workspace.Surface Converter Storage",
+															}
+															Config.extraClassSuffixes = {
+																[".remoteevent"] = "RemoteEvent",
+																[".remotefunction"] = "RemoteFunction",
+																[".bindableevent"] = "BindableEvent",
+																[".bindablefunction"] = "BindableFunction",
+															}
 
-												labeledInput("Heartbeat Interval (seconds)", self.heartbeatRef, {
-													Text = tostring(Config.HEARTBEAT_INTERVAL),
-													Finished = function(text)
-														if text == "" then return end
-														validateNumberInput(text, function(value)
-															self.callbacks.onConfigChanged("HEARTBEAT_INTERVAL", value)
-														end)
-													end,
-												}),
-												labeledInput("Batch Idle Window (seconds)", self.batchIdleRef, {
-													Text = tostring(Config.BATCH_IDLE_WINDOW),
-													Finished = function(text)
-														if text == "" then return end
-														validateNumberInput(text, function(value)
-															self.callbacks.onConfigChanged("BATCH_IDLE_WINDOW", value)
-														end)
-													end,
-												}),
-												labeledInput("Script Change Debounce (seconds)", self.scriptDebounceRef, {
-													Text = tostring(Config.SCRIPT_CHANGE_DEBOUNCE),
-													Finished = function(text)
-														if text == "" then return end
-														validateNumberInput(text, function(value)
-															self.callbacks.onConfigChanged("SCRIPT_CHANGE_DEBOUNCE", value)
-														end)
-													end,
-												}),
-												labeledInput("Maximum Handshake Attempts", self.maxHandshakesRef, {
-													Text = tostring(Config.MAX_HANDSHAKES),
-													Finished = function(text)
-														if text == "" then return end
-														validateNumberInput(text, function(value)
-															self.callbacks.onConfigChanged("MAX_HANDSHAKES", value)
-														end)
-													end,
-												}),
-												labeledInput("Maximum Reconnection Attempts", self.maxReconnectionsRef, {
-													Text = tostring(Config.MAX_RECONNECTIONS),
-													Placeholder = "-1 for infinite attempts",
-													Finished = function(text)
-														if text == "" then return end
-														validateNumberInput(text, function(value)
-															self.callbacks.onConfigChanged("MAX_RECONNECTIONS", value)
-														end, true)
-													end,
-												}),
-												labeledInput("Reconnection Interval (seconds)", self.reconnectionIntervalRef, {
-													Text = tostring(Config.RECONNECTION_INTERVAL),
-													Finished = function(text)
-														if text == "" then return end
-														validateNumberInput(text, function(value)
-															self.callbacks.onConfigChanged("RECONNECTION_INTERVAL", value)
-														end)
-													end,
-												}),
-											}
-										})
-									},
-								}),
+															self:UpdateConfig()
 
-								-- Service Filters Collapsible
-								Collapsible({
-									Title = "Service Filters",
-									Expanded = false,
-									Elements = {
-										Container({
-											Size = UDim2.new(1, 0, 0, 0),
-											AutomaticSize = Enum.AutomaticSize.Y,
-											[Children] = {
-												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
-												List({ Spacing = Theme.ListSpacing }),
-
-												Text({
-													Text = "List Type",
-													TextSize = Theme.TextSize.Small,
-													Color = Theme.Colors.TextDimmed,
-													AutomaticSize = Enum.AutomaticSize.XY,
-												}),
-												OptionSelector({
-													Options = { "Whitelist", "Blacklist" },
-													Value = self.listTypeValue,
-													Selected = function(option)
-														self.callbacks.onConfigChanged(
-															"LIST_TYPE",
-															option == "Whitelist" and Enums.listType.WHITELIST
-																or Enums.listType.BLACKLIST
-														)
-													end,
-												}),
-												labeledInput("Service List (comma-separated)", self.serviceListRef, {
-													Text = table.concat(Config.SERVICE_LIST, ", "),
-													BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
-													Finished = function(text)
-														local items = AzulService.parseCommaSeparatedList(text)
-														self.callbacks.onConfigChanged("SERVICE_LIST", items)
-													end,
-												}),
-												labeledInput("Excluded Parents (comma-separated)", self.excludedParentsRef, {
-													Text = table.concat(Config.EXCLUDED_PARENTS, ", "),
-													BoxSize = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium * 2),
-													Finished = function(text)
-														local items = AzulService.parseCommaSeparatedList(text)
-														self.callbacks.onConfigChanged("EXCLUDED_PARENTS", items)
-													end,
-												}),
-											}
-										})
-									},
-								}),
-
-								-- Developer Tools Collapsible
-								Collapsible({
-									Title = "Developer Tools",
-									Expanded = false,
-									Elements = {
-										Container({
-											Size = UDim2.new(1, 0, 0, 0),
-											AutomaticSize = Enum.AutomaticSize.Y,
-											[Children] = {
-												Padding({ Left = 8, Right = 8, Top = 8, Bottom = 8 }),
-												List({ Spacing = Theme.ListSpacing }),
-
-												TextButton({
-													Text = "Reload Sourcemap",
-													Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
-													Activated = function()
-														self.callbacks.onSourcemapReload()
-													end,
-												}),
-												infoText("Force reload the sourcemap file from disk to reset the sync state."),
-												
-												TextButton({
-													Text = "Open Place Configuration",
-													Size = UDim2.new(1, 0, 0, Theme.CompSizeY.Medium),
-													Activated = function()
-														helpers.openPlaceConfig()
-													end,
-												}),
-												infoText("Open the per-place configuration script in ServerStorage."),
-											}
-										})
+															self.callbacks.onConfigChanged("AUTO_CONNECT", false)
+															self.callbacks.onConfigChanged("DEBUG_MODE", false)
+															self.callbacks.onConfigChanged("SILENT_MODE", false)
+															self.callbacks.onConfigChanged("HEARTBEAT_INTERVAL", 30)
+															self.callbacks.onConfigChanged("BATCH_IDLE_WINDOW", 0.1)
+															self.callbacks.onConfigChanged("SCRIPT_CHANGE_DEBOUNCE", 0.35)
+															self.callbacks.onConfigChanged("MAX_HANDSHAKES", 5)
+															self.callbacks.onConfigChanged("MAX_RECONNECTIONS", -1)
+															self.callbacks.onConfigChanged("RECONNECTION_INTERVAL", 5)
+															self.callbacks.onConfigChanged("LIST_TYPE", Enums.listType.WHITELIST)
+															self.callbacks.onConfigChanged("SERVICE_LIST", Config.SERVICE_LIST)
+															self.callbacks.onConfigChanged("EXCLUDED_PARENTS", Config.EXCLUDED_PARENTS)
+															self.callbacks.onConfigChanged("extraClassSuffixes", Config.extraClassSuffixes)
+														end,
+													}),
+													infoText("Reset all settings to default values."),
+												}
+											end
+											return {}
+										end),
 									},
 								}),
 							},
@@ -794,6 +865,8 @@ function UI:UpdateConfig()
 
 	local excludedParentsInput = peek(self.excludedParentsRef)
 	if excludedParentsInput then excludedParentsInput.Text = table.concat(Config.EXCLUDED_PARENTS, ", ") end
+
+	self.extraClassSuffixesValue:set(Config.extraClassSuffixes)
 end
 
 return UI

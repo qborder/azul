@@ -8,11 +8,14 @@
     "azul": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node --max-old-space-size=1024 ./node_modules/typescript/bin/tsc",
+    "build:plugin": "cd plugin && argon build -p",
+    "install:g": "pnpm -g add .",
     "test": "npm run build && node --test dist/tests/daemon.test.js dist/tests/snapshot.test.js dist/tests/rojo.test.js dist/tests/property_loader.test.js dist/tests/pack.test.js",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "clean": "rimraf dist",
+    "all": "pnpm build && pnpm build:plugin && pnpm install:g",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"
   },
@@ -34,6 +37,7 @@
     "url": "https://github.com/Ransomwave/azul"
   },
   "dependencies": {
+    "azul-sync": "link:",
     "chokidar": "^3.5.3",
     "ws": "^8.16.0"
   },

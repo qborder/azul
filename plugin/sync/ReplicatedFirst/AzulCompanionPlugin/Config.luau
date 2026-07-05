@@ -12,6 +12,12 @@ configTable = {
 	BATCH_IDLE_WINDOW = 0.1,
 	SCRIPT_CHANGE_DEBOUNCE = 0.35,
 	LIST_TYPE = Enums.listType.WHITELIST, -- or BLACKLIST
+	extraClassSuffixes = {
+		[".remoteevent"] = "RemoteEvent",
+		[".remotefunction"] = "RemoteFunction",
+		[".bindableevent"] = "BindableEvent",
+		[".bindablefunction"] = "BindableFunction",
+	},
 	SERVICE_LIST = {
 		"Workspace",
 		"Lighting",

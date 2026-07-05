@@ -85,7 +85,6 @@ function WebSocketClient:connect()
 	self = self :: WebSocketClient
 	if self.connected then return true end
 
-	-- Create WebSocket client using CreateWebStreamClient
 	local success, result = pcall(function()
 		return HttpService:CreateWebStreamClient(Enum.WebStreamClientType.WebSocket, {
 			Url = self.url,
@@ -99,9 +98,7 @@ function WebSocketClient:connect()
 	end
 
 	self.client = result
-	self.connected = true
 
-	-- Set up message handler (only MessageReceived is documented)
 	self.client.MessageReceived:Connect(function(message)
 		local parseSuccess, parseResult = pcall(function()
 			self:handleMessage(message)
@@ -112,11 +109,30 @@ function WebSocketClient:connect()
 		end
 	end)
 
-	-- Notify connection established
-	self:debugPrint("Connected to", self.url)
-	if self.messageHandlers.connect then task.defer(function()
-		self.messageHandlers.connect()
-	end) end
+	self.client.Opened:Connect(function(statusCode, headers)
+		self.connected = true
+		self:debugPrint("Connection opened with status:", statusCode)
+		if self.messageHandlers.connect then
+			self.messageHandlers.connect()
+		end
+	end)
+
+	self.client.Closed:Connect(function()
+		if self.connected then
+			self.connected = false
+			self:debugPrint("Connection closed")
+			if self.messageHandlers.disconnect then
+				self.messageHandlers.disconnect()
+			end
+		end
+	end)
+
+	self.client.Error:Connect(function(errMessage)
+		warn("[WebSocket]: Stream error:", errMessage)
+		if self.messageHandlers.error then
+			self.messageHandlers.error(errMessage)
+		end
+	end)
 
 	return true
 end
@@ -175,14 +191,15 @@ end
 function WebSocketClient:disconnect()
 	self = self :: WebSocketClient
 
-	if not self.connected or not self.client then return end
+	if not self.client then return end
 
+	local wasConnected = self.connected
 	self.connected = false
-
 	self.client:Close()
-	-- self.client = nil
 
-	if self.messageHandlers.disconnect then self.messageHandlers.disconnect() end
+	if wasConnected and self.messageHandlers.disconnect then
+		self.messageHandlers.disconnect()
+	end
 end
 
 return WebSocketClient

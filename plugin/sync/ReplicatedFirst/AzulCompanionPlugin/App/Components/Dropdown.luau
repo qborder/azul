@@ -5,14 +5,23 @@ local Util = Components.Util
 
 local Fusion = require(Azul.Packages.fusion)
 
-local GlobalUtil = require(Azul.Util)
-
 local Theme = require(App.Theme)
 local Assets = require(App.Assets)
 local animate = require(Util.animate)
 local stripProps = require(Util.stripProps)
 local getTextSize = require(Util.getTextSize)
 local getState = require(Util.getState)
+
+local function join(t1, t2)
+	local result = {}
+	for _, v in t1 do
+		table.insert(result, v)
+	end
+	for _, v in t2 do
+		table.insert(result, v)
+	end
+	return result
+end
 local isState = require(Util.isState)
 
 local Container = require(Components.Container)
@@ -125,7 +134,7 @@ local function Button(props: ButtonProps): TextButton
 			props.Activated()
 		end,
 		[Cleanup] = disconnect,
-		[Children] = GlobalUtil.join(
+		[Children] = join(
 			{
 				Padding({
 					Padding = 6,

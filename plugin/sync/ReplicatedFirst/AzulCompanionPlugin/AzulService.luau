@@ -88,15 +88,31 @@ function AzulService.getOrCreatePath(pathSegments: { string }): Instance
 
 		if not nextNode then
 			if index == 1 then
-				local ok, service = pcall(function() return game:GetService(segment) end)
-				if ok and service then nextNode = service end
+				local lowerSegment = segment:lower()
+				local foundService: Instance? = nil
+				for _, service in ipairs(game:GetChildren()) do
+					if service.Name:lower() == lowerSegment then
+						foundService = service
+						break
+					end
+				end
+				if foundService then
+					nextNode = foundService
+				else
+					local ok, service = pcall(function() return game:GetService(segment) end)
+					if ok and service then nextNode = service end
+				end
 			end
 
 			if not nextNode then
-				local newFolder = Instance.new("Folder")
-				newFolder.Name = segment
-				newFolder.Parent = current
-				nextNode = newFolder
+				if current == game then
+					warn(`[AzulService]: Cannot create folder "{segment}" directly under game. Skipping.`)
+				else
+					local newFolder = Instance.new("Folder")
+					newFolder.Name = segment
+					newFolder.Parent = current
+					nextNode = newFolder
+				end
 			end
 		end
 
@@ -190,7 +206,17 @@ function AzulService.instanceToData(
 
 	if AzulService.isScript(instance) then data.source = ScriptEditorService:GetEditorSource(instance) end
 
-	if options and options.includeProperties then
+	local isExtraClass = false
+	if Config.extraClassSuffixes then
+		for _, className in pairs(Config.extraClassSuffixes) do
+			if instance:IsA(className) then
+				isExtraClass = true
+				break
+			end
+		end
+	end
+
+	if (options and options.includeProperties) or isExtraClass then
 		local properties = Serializer.collectSerializedProperties(instance, {
 			getInstanceRefData = function(referenceInstance: Instance)
 				local referencePath = AzulService.getInstancePath(referenceInstance)
@@ -204,13 +230,13 @@ function AzulService.instanceToData(
 				}
 			end,
 		})
-		if next(properties) ~= nil then data.properties = properties end
+		data.properties = properties
 
 		local attributes = instance:GetAttributes()
-		if next(attributes) ~= nil then data.attributes = attributes end
+		data.attributes = attributes
 
 		local tags = Serializer.collectSerializedTags(instance)
-		if #tags > 0 then data.tags = tags end
+		data.tags = tags
 	end
 
 	return data
@@ -281,7 +307,8 @@ type MeshData = {
 --- Apply snapshot instances to the workspace
 function AzulService.applySnapshotInstances(
 	instances: { InstanceData },
-	destination: { string }?
+	destination: { string }?,
+	guidMap: { [string]: Instance }?
 ): (number, number, { [string]: Instance })
 	-- Sort instances by path length to make sure parents are created before children
 	table.sort(instances, function(a, b) return #a.path < #b.path end)
@@ -407,6 +434,13 @@ function AzulService.applySnapshotInstances(
 	local guidMatchCount = 0
 	local fallbackMatchCount = 0
 
+	for _, existing in ipairs(game:GetChildren()) do
+		local guid = existing:GetDebugId(0)
+		if type(guid) == "string" and guid ~= "" then
+			existingInstancesByGuid[guid] = existing
+			initialStudioGuids[guid] = true
+		end
+	end
 	for _, existing in ipairs(game:GetDescendants()) do
 		local guid = existing:GetDebugId(0)
 		if type(guid) == "string" and guid ~= "" then
@@ -463,7 +497,9 @@ function AzulService.applySnapshotInstances(
 			and item.parentGuid ~= ""
 			and item.parentGuid ~= "root"
 		then
-			parent = resolvedInstancesByGuid[item.parentGuid] or existingInstancesByGuid[item.parentGuid]
+			parent = resolvedInstancesByGuid[item.parentGuid]
+				or (guidMap and guidMap[item.parentGuid])
+				or existingInstancesByGuid[item.parentGuid]
 		end
 		if not parent then parent = AzulService.getOrCreatePath(parentPath) end
 

@@ -3,10 +3,9 @@ import assert from "node:assert/strict";
 import { PackCommand } from "../pack.js";
 import { config } from "../config.js";
 
-// Use ephemeral IPC port to avoid collisions
-config.port = 0;
-
 test("PackCommand regenerate and pack produce _azul metadata and pack nodes", () => {
+  const prevPort = config.port;
+  config.port = 0;
   const pack = new PackCommand({});
   try {
     const snapshot = [
@@ -42,5 +41,6 @@ test("PackCommand regenerate and pack produce _azul metadata and pack nodes", ()
     assert.strictEqual(typeof packed, "number");
   } finally {
     (pack as any).ipc.close();
+    config.port = prevPort;
   }
 });

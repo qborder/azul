@@ -13,6 +13,7 @@ SyncSession.__index = SyncSession
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 local ScriptEditorService = game:GetService("ScriptEditorService")
+local CollectionService = game:GetService("CollectionService")
 
 -- Modules
 local AzulService = require("./AzulService")
@@ -355,7 +356,16 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 		if not instance then
 			return false
 		end
-		if not AzulService.isScript(instance) then
+		local isSyncable = AzulService.isScript(instance)
+		if not isSyncable and self.config.extraClassSuffixes then
+			for _, className in pairs(self.config.extraClassSuffixes) do
+				if instance:IsA(className) then
+					isSyncable = true
+					break
+				end
+			end
+		end
+		if not isSyncable then
 			return false
 		end
 		return not AzulService.isExcluded(instance, self.serviceSet)
@@ -424,6 +434,29 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 				onScriptChanged(instance :: Script)
 			end)
 			table.insert(self.connections, sourceConnection)
+		else
+			local isExtraClass = false
+			if self.config.extraClassSuffixes then
+				for _, className in pairs(self.config.extraClassSuffixes) do
+					if instance:IsA(className) then
+						isExtraClass = true
+						break
+					end
+				end
+			end
+			if isExtraClass then
+				local propertyConnection = instance.Changed:Connect(function()
+					if not self.syncEnabled then return end
+					sendInstanceUpdateDedup(instance)
+				end)
+				table.insert(self.connections, propertyConnection)
+
+				local attributeConnection = instance.AttributeChanged:Connect(function()
+					if not self.syncEnabled then return end
+					sendInstanceUpdateDedup(instance)
+				end)
+				table.insert(self.connections, attributeConnection)
+			end
 		end
 	end
 
@@ -541,9 +574,23 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 		local scriptsAndDescendantsOnly = options and options.scriptsAndDescendantsOnly == true
 		local includeAncestorsOfScripts: { [Instance]: boolean } = {}
 
+		local function isSyncableInstance(instance)
+			if AzulService.isScript(instance) then
+				return true
+			end
+			if self.config.extraClassSuffixes then
+				for _, className in pairs(self.config.extraClassSuffixes) do
+					if instance:IsA(className) then
+						return true
+					end
+				end
+			end
+			return false
+		end
+
 		if scriptsAndDescendantsOnly then
 			for _, descendant in ipairs(game:GetDescendants()) do
-				if AzulService.isScript(descendant) and shouldIncludeInSnapshot(descendant) then
+				if isSyncableInstance(descendant) and shouldIncludeInSnapshot(descendant) then
 					local current: Instance? = descendant
 					while current and current ~= game do
 						if shouldIncludeInSnapshot(current) then
@@ -586,7 +633,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 
 			local includeByMode = true
 			if scriptsAndDescendantsOnly then
-				includeByMode = AzulService.isScript(instance)
+				includeByMode = isSyncableInstance(instance)
 					or hasScriptAncestor
 					or includeAncestorsOfScripts[instance] == true
 			end
@@ -611,7 +658,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 				if shouldIncludeInSnapshot(child) then
 					table.insert(queue, {
 						instance = child,
-						hasScriptAncestor = hasScriptAncestor or AzulService.isScript(instance),
+						hasScriptAncestor = hasScriptAncestor or isSyncableInstance(instance),
 					})
 				end
 			end
@@ -732,7 +779,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 					wipeBuildRoots(message.data or {})
 				end
 
-				local created, updated, appliedGuidMap = AzulService.applySnapshotInstances(message.data)
+				local created, updated, appliedGuidMap = AzulService.applySnapshotInstances(message.data, nil, self.guidMap)
 				for guid, instance in pairs(appliedGuidMap) do
 					self.guidMap[guid] = instance
 					self.trackedInstances[instance] = guid
@@ -774,7 +821,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 					end
 
 					local created, updated, appliedGuidMap =
-						AzulService.applySnapshotInstances(mapping.instances or {}, mapping.destination)
+						AzulService.applySnapshotInstances(mapping.instances or {}, mapping.destination, self.guidMap)
 					for guid, instance in pairs(appliedGuidMap) do
 						self.guidMap[guid] = instance
 						self.trackedInstances[instance] = guid
@@ -801,6 +848,10 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 				self.handshakeComplete = true
 				self:debugPrint("Handshake acknowledged by daemon")
 				self:infoPrint("Handshake with Daemon successful")
+				if type(message.extraClassSuffixes) == "table" then
+					self.config.extraClassSuffixes = message.extraClassSuffixes
+					self:debugPrint("Updated extraClassSuffixes from handshakeAck")
+				end
 				sendDaemonConfig()
 				if self.ui then
 					self.ui:UpdateHandshakeState(true)
@@ -816,7 +867,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 			setOutboundSuppressed(true)
 
 			local ok, err = pcall(function()
-				local created, updated, appliedGuidMap = AzulService.applySnapshotInstances({ message.data })
+				local created, updated, appliedGuidMap = AzulService.applySnapshotInstances({ message.data }, nil, self.guidMap)
 				for guid, instance in pairs(appliedGuidMap) do
 					self.guidMap[guid] = instance
 					self.trackedInstances[instance] = guid
@@ -1018,6 +1069,23 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 			onScriptChanged(changedScript :: Script)
 		end)
 		table.insert(self.connections, textDocumentChangedConnection)
+
+		local function onTagChanged(instance: Instance)
+			if not self.syncEnabled or self.suppressOutbound then return end
+			if shouldSync(instance) then
+				sendInstanceUpdateDedup(instance)
+			end
+		end
+
+		local tagAddedConnection = CollectionService.TagAdded:Connect(function(tag, instance)
+			onTagChanged(instance)
+		end)
+		table.insert(self.connections, tagAddedConnection)
+
+		local tagRemovedConnection = CollectionService.TagRemoved:Connect(function(tag, instance)
+			onTagChanged(instance)
+		end)
+		table.insert(self.connections, tagRemovedConnection)
 
 		local heartbeatConnection = RunService.Heartbeat:Connect(function(dt)
 			if self.syncEnabled then

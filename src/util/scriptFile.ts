@@ -1,3 +1,5 @@
+import { config } from "../config.js";
+
 export type ScriptClassName = "Script" | "LocalScript" | "ModuleScript";
 
 export interface ClassifiedScriptFile {
@@ -55,10 +57,24 @@ export function classifyScriptFileName(
     };
   }
 
+  if (base.endsWith(".legacy")) {
+    return {
+      className: "Script",
+      scriptName: normalizeName(base.replace(/\.legacy$/, "")),
+    };
+  }
+
   if (base.endsWith(".client")) {
     return {
       className: "LocalScript",
       scriptName: normalizeName(base.replace(/\.client$/, "")),
+    };
+  }
+
+  if (base.endsWith(".local")) {
+    return {
+      className: "LocalScript",
+      scriptName: normalizeName(base.replace(/\.local$/, "")),
     };
   }
 
@@ -72,5 +88,55 @@ export function classifyScriptFileName(
   return {
     className: "ModuleScript",
     scriptName: normalizeName(base),
+  };
+}
+
+export interface ClassifiedFile {
+  className: string;
+  instanceName: string;
+  isScript: boolean;
+}
+
+export function isSyncableFile(fileName: string): boolean {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".lua") || lower.endsWith(".luau")) {
+    return true;
+  }
+  for (const suffix of Object.keys(config.extraClassSuffixes)) {
+    if (lower.endsWith(suffix.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function classifyFileName(fileName: string): ClassifiedFile {
+  const lower = fileName.toLowerCase();
+  for (const [suffix, className] of Object.entries(config.extraClassSuffixes)) {
+    if (lower.endsWith(suffix.toLowerCase())) {
+      const instanceName = fileName.slice(0, -suffix.length);
+      return {
+        className,
+        instanceName,
+        isScript: false,
+      };
+    }
+  }
+
+  if (isScriptFileName(fileName)) {
+    const { className, scriptName } = classifyScriptFileName(fileName, {
+      stripDisambiguationSuffix: true,
+    });
+    return {
+      className,
+      instanceName: scriptName,
+      isScript: true,
+    };
+  }
+
+  return {
+    className: "Folder",
+    instanceName: fileName,
+    isScript: false,
   };
 }

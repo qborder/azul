@@ -7,6 +7,8 @@ import {
   isInstanceJsonName,
   isScriptFileName,
   ScriptClassName,
+  classifyFileName,
+  isSyncableFile,
 } from "../../util/scriptFile.js";
 import type { InstanceData } from "../../ipc/messages.js";
 import { convertImplicitRojoProperty } from "./convert.js";
@@ -799,6 +801,33 @@ export class RojoSnapshotBuilder {
           path: [...destPath, scriptName],
           source,
         });
+      } else if (isSyncableFile(entry.name)) {
+        if (entry.name === "init.json") {
+          continue;
+        }
+        const { className, instanceName } = classifyFileName(entry.name);
+        if (definedChildren.has(instanceName)) {
+          continue;
+        }
+
+        let extraData: any = {};
+        try {
+          const raw = await fs.readFile(fullPath, "utf-8");
+          extraData = JSON.parse(raw);
+        } catch (error) {
+          log.warn(`Failed to parse JSON file ${fullPath}:`, error);
+        }
+
+        this.ensureFolder(destPath, results);
+        results.push({
+          guid: this.makeGuid(),
+          className,
+          name: instanceName,
+          path: [...destPath, instanceName],
+          properties: extraData.properties,
+          attributes: extraData.attributes,
+          tags: extraData.tags,
+        });
       }
     }
   }
@@ -846,7 +875,7 @@ export class RojoSnapshotBuilder {
    * Returns a list of potential init script filenames.
    */
   private getInitCandidates(): string[] {
-    const bases = ["init", "init.server", "init.client", "init.module"];
+    const bases = ["init", "init.server", "init.legacy", "init.client", "init.local", "init.module"];
 
     const variants: string[] = [];
     for (const base of bases) {

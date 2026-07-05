@@ -7,7 +7,7 @@ import { log } from "./util/log.js";
 import { SnapshotBuilder } from "./snapshot.js";
 import { RojoSnapshotBuilder } from "./snapshot/rojo/index.js";
 import { generateGUID } from "./util/id.js";
-import { classifyScriptFileName, isInstanceJsonName, isScriptFileName } from "./util/scriptFile.js";
+import { classifyScriptFileName, isInstanceJsonName, isScriptFileName, classifyFileName, isSyncableFile } from "./util/scriptFile.js";
 import {
   applySourcemapProperties,
   buildInstancesFromSourcemap,
@@ -304,19 +304,29 @@ export class PushCommand {
     sourceFile: string,
     destSegments: string[],
   ): Promise<InstanceData[] | null> {
-    if (!isScriptFileName(path.basename(sourceFile))) {
+    if (!isSyncableFile(path.basename(sourceFile))) {
       log.error(
-        `Source file is not a .lua/.luau script and cannot be pushed directly: ${sourceFile}`,
+        `Source file is not syncable and cannot be pushed directly: ${sourceFile}`,
       );
       return null;
     }
 
     const fileName = path.basename(sourceFile);
-    const { className, scriptName } = classifyScriptFileName(fileName, {
-      stripDisambiguationSuffix: true,
-    });
+    const { className, instanceName, isScript } = classifyFileName(fileName);
 
-    const source = await fsp.readFile(sourceFile, "utf-8");
+    let source: string | undefined = undefined;
+    let extraData: any = undefined;
+
+    if (isScript) {
+      source = await fsp.readFile(sourceFile, "utf-8");
+    } else {
+      const raw = await fsp.readFile(sourceFile, "utf-8");
+      try {
+        extraData = JSON.parse(raw);
+      } catch (error) {
+        log.warn(`Failed to parse JSON file ${sourceFile}:`, error);
+      }
+    }
 
     // Get the sourcemap node for this file, if it exists, so we can pull properties/attributes/tags from it
     const sourcemapIndex = this.getSourcemapIndexForPath(this.sourcemapPath);
@@ -326,12 +336,12 @@ export class PushCommand {
       {
         guid: node?.guid ?? generateGUID(),
         className,
-        name: scriptName,
-        path: [...destSegments, scriptName],
+        name: instanceName,
+        path: [...destSegments, instanceName],
         source,
-        properties: node?.properties,
-        attributes: node?.attributes,
-        tags: node?.tags,
+        properties: extraData?.properties ?? node?.properties,
+        attributes: extraData?.attributes ?? node?.attributes,
+        tags: extraData?.tags ?? node?.tags,
       },
     ];
   }
@@ -836,14 +846,54 @@ export class PushCommand {
 
       entries.sort((a, b) => a.name.localeCompare(b.name));
 
+      // If the directory itself represents a syncable extra class, emit it
+      if (relSegments.length > 0) {
+        const dirName = path.basename(dir);
+        const { className, instanceName, isScript } = classifyFileName(dirName);
+        if (!isScript && className !== "Folder") {
+          const destPath = [...destSegments, ...relSegments];
+          const cleanPath = destPath.map(s => classifyFileName(s).instanceName);
+          const key = cleanPath.join("/");
+          if (!emittedPaths.has(key)) {
+            this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
+            emittedPaths.add(key);
+            emittedFolders.add(destPath.join("/"));
+
+            let extraData: any = {};
+            const initJsonPath = path.join(dir, "init.json");
+            if (fs.existsSync(initJsonPath)) {
+              try {
+                extraData = JSON.parse(fs.readFileSync(initJsonPath, "utf-8"));
+              } catch (error) {
+                log.warn(`Failed to parse init.json in ${dir}:`, error);
+              }
+            }
+
+            results.push({
+              guid: generateGUID(),
+              className,
+              name: instanceName,
+              path: cleanPath,
+              properties: extraData.properties,
+              attributes: extraData.attributes,
+              tags: extraData.tags,
+            });
+          }
+        }
+      }
+
       // If this directory has an init-like file, treat the directory itself as that script
       const initCandidates = [
         "init.lua",
         "init.luau",
         "init.server.lua",
         "init.server.luau",
+        "init.legacy.lua",
+        "init.legacy.luau",
         "init.client.lua",
         "init.client.luau",
+        "init.local.lua",
+        "init.local.luau",
         "init.module.lua",
         "init.module.luau",
       ];
@@ -859,11 +909,12 @@ export class PushCommand {
       if (initModelEntry) {
         const full = path.join(dir, "init.model.json");
         const destPath = [...destSegments, ...relSegments];
-        const key = destPath.join("/");
+        const cleanPath = destPath.map(s => classifyFileName(s).instanceName);
+        const key = cleanPath.join("/");
         if (!emittedPaths.has(key)) {
           this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
           emittedPaths.add(key);
-          emittedFolders.add(key); // prevent folder emission at this path
+          emittedFolders.add(destPath.join("/")); // prevent folder emission at this path
 
           const builder = new RojoSnapshotBuilder({ cwd: process.cwd() });
           const modelInstances = await builder.parseModelFile(full, destPath);
@@ -889,16 +940,17 @@ export class PushCommand {
           stripDisambiguationSuffix: true,
         });
         const destPath = [...destSegments, ...relSegments];
-        const key = destPath.join("/");
+        const cleanPath = destPath.map(s => classifyFileName(s).instanceName);
+        const key = cleanPath.join("/");
         if (!emittedPaths.has(key)) {
           this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
           emittedPaths.add(key);
-          emittedFolders.add(key); // prevent folder emission at this path
+          emittedFolders.add(destPath.join("/")); // prevent folder emission at this path
           results.push({
             guid: generateGUID(),
             className,
-            name: destPath[destPath.length - 1] ?? path.basename(dir),
-            path: destPath,
+            name: cleanPath[cleanPath.length - 1] ?? path.basename(dir),
+            path: cleanPath,
             source: await fsp.readFile(full, "utf-8"),
           });
         }
@@ -922,7 +974,8 @@ export class PushCommand {
         if (isInstanceJsonName(entry.name)) {
           const baseName = entry.name.slice(0, -".model.json".length);
           const destPath = [...destSegments, ...relSegments, baseName];
-          const key = destPath.join("/");
+          const cleanPath = destPath.map(s => classifyFileName(s).instanceName);
+          const key = cleanPath.join("/");
           if (emittedPaths.has(key)) continue;
 
           this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
@@ -956,36 +1009,65 @@ export class PushCommand {
           continue;
         }
 
-        if (!isScriptFileName(entry.name)) continue;
+        if (isScriptFileName(entry.name)) {
+          // Skip scripts that are companion scripts of a companion model file
+          const baseName = classifyScriptFileName(entry.name, {
+            stripDisambiguationSuffix: true,
+          }).scriptName;
+          const companionModelName = `${baseName}.model.json`;
+          const hasCompanionModel = entries.some(
+            (e) => e.isFile() && e.name === companionModelName,
+          );
+          if (hasCompanionModel) {
+            continue;
+          }
 
-        // Skip scripts that are companion scripts of a companion model file
-        const baseName = classifyScriptFileName(entry.name, {
-          stripDisambiguationSuffix: true,
-        }).scriptName;
-        const companionModelName = `${baseName}.model.json`;
-        const hasCompanionModel = entries.some(
-          (e) => e.isFile() && e.name === companionModelName,
-        );
-        if (hasCompanionModel) {
-          continue;
+          const { className, scriptName } = classifyScriptFileName(entry.name, {
+            stripDisambiguationSuffix: true,
+          });
+          const destPath = [...destSegments, ...relSegments, scriptName];
+          const cleanPath = destPath.map(s => classifyFileName(s).instanceName);
+          const key = cleanPath.join("/");
+          if (emittedPaths.has(key)) continue;
+
+          this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
+          emittedPaths.add(key);
+          results.push({
+            guid: generateGUID(),
+            className,
+            name: scriptName,
+            path: cleanPath,
+            source: await fsp.readFile(full, "utf-8"),
+          });
+        } else if (isSyncableFile(entry.name)) {
+          if (entry.name === "init.json") continue;
+
+          const { className, instanceName } = classifyFileName(entry.name);
+          const destPath = [...destSegments, ...relSegments, instanceName];
+          const cleanPath = destPath.map(s => classifyFileName(s).instanceName);
+          const key = cleanPath.join("/");
+          if (emittedPaths.has(key)) continue;
+
+          let extraData: any = {};
+          try {
+            const raw = await fsp.readFile(full, "utf-8");
+            extraData = JSON.parse(raw);
+          } catch (error) {
+            log.warn(`Failed to parse JSON file ${full}:`, error);
+          }
+
+          this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
+          emittedPaths.add(key);
+          results.push({
+            guid: generateGUID(),
+            className,
+            name: instanceName,
+            path: cleanPath,
+            properties: extraData.properties,
+            attributes: extraData.attributes,
+            tags: extraData.tags,
+          });
         }
-
-        const { className, scriptName } = classifyScriptFileName(entry.name, {
-          stripDisambiguationSuffix: true,
-        });
-        const destPath = [...destSegments, ...relSegments, scriptName];
-        const key = destPath.join("/");
-        if (emittedPaths.has(key)) continue;
-
-        this.ensureFolder(destPath.slice(0, -1), results, emittedFolders);
-        emittedPaths.add(key);
-        results.push({
-          guid: generateGUID(),
-          className,
-          name: scriptName,
-          path: destPath,
-          source: await fsp.readFile(full, "utf-8"),
-        });
       }
     };
 
@@ -1003,11 +1085,16 @@ export class PushCommand {
     if (emittedFolders.has(key)) return;
     this.ensureFolder(pathSegments.slice(0, -1), results, emittedFolders);
     emittedFolders.add(key);
+
+    const segment = pathSegments[pathSegments.length - 1];
+    const { className, instanceName } = classifyFileName(segment);
+    const cleanPath = pathSegments.map((s) => classifyFileName(s).instanceName);
+
     results.push({
       guid: generateGUID(),
-      className: "Folder",
-      name: pathSegments[pathSegments.length - 1],
-      path: [...pathSegments],
+      className,
+      name: instanceName,
+      path: cleanPath,
     });
   }
 

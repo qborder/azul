@@ -38,6 +38,9 @@ export interface AzulConfig {
 
   /** Check for Daemon updates? (Uses NPM API) */
   checkForUpdates: boolean;
+
+  /** Suffixes and class name mappings for specific non-script instances */
+  extraClassSuffixes: Record<string, string>;
 }
 
 export const defaultConfig: Readonly<AzulConfig> = {
@@ -50,6 +53,12 @@ export const defaultConfig: Readonly<AzulConfig> = {
   deleteOrphansOnConnect: true,
   suffixModuleScripts: false,
   checkForUpdates: true,
+  extraClassSuffixes: {
+    ".remoteevent": "RemoteEvent",
+    ".remotefunction": "RemoteFunction",
+    ".bindableevent": "BindableEvent",
+    ".bindablefunction": "BindableFunction",
+  },
 };
 
 export const config: AzulConfig = { ...defaultConfig };
@@ -178,6 +187,20 @@ function sanitizeConfig(input: Record<string, unknown>): Partial<AzulConfig> {
 
   if (typeof input.checkForUpdates === "boolean") {
     sanitized.checkForUpdates = input.checkForUpdates;
+  }
+
+  if (
+    input.extraClassSuffixes &&
+    typeof input.extraClassSuffixes === "object" &&
+    !Array.isArray(input.extraClassSuffixes)
+  ) {
+    const suffixes: Record<string, string> = {};
+    for (const [key, val] of Object.entries(input.extraClassSuffixes)) {
+      if (typeof key === "string" && typeof val === "string") {
+        suffixes[key] = val;
+      }
+    }
+    sanitized.extraClassSuffixes = suffixes;
   }
 
   return sanitized;

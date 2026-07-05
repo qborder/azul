@@ -11,7 +11,7 @@ import { log } from "./util/log.js";
 import { config, initializeConfig } from "./config.js";
 import type { StudioMessage } from "./ipc/messages.js";
 import { generateGUID } from "./util/id.js";
-import { classifyScriptFileName } from "./util/scriptFile.js";
+import { classifyFileName } from "./util/scriptFile.js";
 
 /**
  * Main orchestrator for the Azul daemon
@@ -55,6 +55,9 @@ export class SyncDaemon {
     this.ipc.onMessage((message) => this.handleStudioMessage(message));
     this.ipc.onHandshake(() => {
       this.ipc.requestSnapshot();
+    });
+    this.ipc.onDisconnect(() => {
+      this.handleClientDisconnect();
     });
 
     // Handle file changes from filesystem
@@ -107,16 +110,23 @@ export class SyncDaemon {
         break;
 
       case "clientDisconnect":
-        log.info("Studio requested daemon shutdown");
-        void (async () => {
-          await this.stop();
-          process.exit(0);
-        })();
+        log.info("Studio client requested disconnect");
+        this.handleClientDisconnect();
         break;
 
       default:
         log.warn("Unknown message type:", (message as any).type);
     }
+  }
+
+  /**
+   * Handle client disconnect gracefully without closing the process
+   */
+  private handleClientDisconnect(): void {
+    log.info("Studio client disconnected. Stopping file watcher, keeping server active...");
+    void (async () => {
+      await this.fileWatcher.stop();
+    })();
   }
 
   /**
@@ -177,11 +187,11 @@ export class SyncDaemon {
 
     if (node) {
       // Precompute path and suppress watcher before writing to avoid race conditions
-      const filePath = this.fileWriter.getFilePath(node);
+      const filePath = this.fileWriter.getFilePath(node, this.tree.getAllNodes());
       this.fileWatcher.suppressNextChange(filePath, source);
 
       // Write to filesystem
-      this.fileWriter.writeScript(node);
+      this.fileWriter.writeScript(node, this.tree.getAllNodes());
 
       // Incrementally update sourcemap entry for this script
       this.sourcemapGenerator.upsertSubtree(
@@ -206,22 +216,31 @@ export class SyncDaemon {
       return;
     }
 
-    const scriptsToUpdate: Map<string, TreeNode> = new Map();
+    const nodesToUpdate: Map<string, TreeNode> = new Map();
 
-    if (this.isScriptClass(node.className)) {
-      scriptsToUpdate.set(node.guid, node);
+    if (this.isSyncableClass(node.className)) {
+      nodesToUpdate.set(node.guid, node);
     }
 
     if (update.pathChanged || update.nameChanged || update.parentChanged) {
-      for (const child of this.tree.getDescendantScripts(node.guid)) {
-        scriptsToUpdate.set(child.guid, child);
+      for (const child of this.tree.getDescendantSyncableNodes(node.guid)) {
+        nodesToUpdate.set(child.guid, child);
       }
     }
 
-    for (const scriptNode of scriptsToUpdate.values()) {
-      const filePath = this.fileWriter.getFilePath(scriptNode);
-      this.fileWatcher.suppressNextChange(filePath, scriptNode.source);
-      this.fileWriter.writeScript(scriptNode);
+    for (const syncableNode of nodesToUpdate.values()) {
+      const filePath = this.fileWriter.getFilePath(syncableNode, this.tree.getAllNodes());
+      if (this.isScriptClass(syncableNode.className)) {
+        this.fileWatcher.suppressNextChange(filePath, syncableNode.source);
+      } else {
+        const payload = {
+          properties: syncableNode.properties || {},
+          attributes: syncableNode.attributes || {},
+          tags: syncableNode.tags || [],
+        };
+        this.fileWatcher.suppressNextChange(filePath, JSON.stringify(payload, null, 2));
+      }
+      this.fileWriter.writeScript(syncableNode, this.tree.getAllNodes());
     }
 
     const shouldUpdateSourcemap =
@@ -229,7 +248,7 @@ export class SyncDaemon {
       update.pathChanged ||
       update.nameChanged ||
       update.parentChanged ||
-      this.isScriptClass(node.className);
+      this.isSyncableClass(node.className);
 
     if (shouldUpdateSourcemap) {
       this.sourcemapGenerator.upsertSubtree(
@@ -261,18 +280,18 @@ export class SyncDaemon {
       return;
     }
 
-    // Capture all script descendants (and the node itself if script) before we delete the tree nodes
-    const scriptsToDelete: { guid: string; filePath: string | null }[] = [];
-    const collectScript = (scriptNode: TreeNode): void => {
-      const filePath = this.fileWriter.getFilePath(scriptNode);
-      scriptsToDelete.push({ guid: scriptNode.guid, filePath });
+    // Capture all syncable descendants (and the node itself if syncable) before we delete the tree nodes
+    const nodesToDelete: { guid: string; filePath: string | null }[] = [];
+    const collectSyncable = (syncableNode: TreeNode): void => {
+      const filePath = this.fileWriter.getFilePath(syncableNode, this.tree.getAllNodes());
+      nodesToDelete.push({ guid: syncableNode.guid, filePath });
     };
 
-    if (this.isScriptClass(node.className)) {
-      collectScript(node);
+    if (this.isSyncableClass(node.className)) {
+      collectSyncable(node);
     }
-    for (const child of this.tree.getDescendantScripts(node.guid)) {
-      collectScript(child);
+    for (const child of this.tree.getDescendantSyncableNodes(node.guid)) {
+      collectSyncable(child);
     }
 
     const pathSegments = node.path;
@@ -280,8 +299,8 @@ export class SyncDaemon {
     // Delete from tree (removes node and descendants)
     this.tree.deleteInstance(guid);
 
-    // Delete files for all affected scripts
-    for (const entry of scriptsToDelete) {
+    // Delete files for all affected syncables
+    for (const entry of nodesToDelete) {
       if (entry.filePath) {
         this.fileWatcher.suppressNextChange(entry.filePath);
       }
@@ -324,6 +343,7 @@ export class SyncDaemon {
     eventType: "add" | "change" | "unlink",
     filePath: string,
     source?: string,
+    extraData?: { properties?: any; attributes?: any; tags?: any },
   ): void {
     const guid = this.fileWriter.getGuidByPath(filePath);
 
@@ -355,22 +375,57 @@ export class SyncDaemon {
       );
 
       const node = this.tree.getNode(guid);
-      if (node?.source === source) {
-        log.debug(
-          `Skipping Studio patch for unchanged file: ${path.relative(this.fileWriter.getBaseDir(), filePath)}.`,
-        );
-        return;
+      if (!node) return;
+
+      const isScript = this.isScriptClass(node.className);
+      if (isScript) {
+        if (node.source === source) {
+          log.debug(
+            `Skipping Studio patch for unchanged file: ${path.relative(this.fileWriter.getBaseDir(), filePath)}.`,
+          );
+          return;
+        }
+
+        // Update tree
+        this.tree.updateScriptSource(guid, source || "");
+
+        // Send patch to Studio
+        this.ipc.patchScript(guid, source || "");
+      } else {
+        // Properties/attributes/tags changed on an extra class instance
+        if (extraData) {
+          const propertiesChanged = JSON.stringify(node.properties || {}) !== JSON.stringify(extraData.properties || {});
+          const attributesChanged = JSON.stringify(node.attributes || {}) !== JSON.stringify(extraData.attributes || {});
+          const tagsChanged = JSON.stringify(node.tags || []) !== JSON.stringify(extraData.tags || []);
+
+          if (!propertiesChanged && !attributesChanged && !tagsChanged) {
+            log.debug(`Skipping Studio update for unchanged extra-class file.`);
+            return;
+          }
+
+          const updatedData = {
+            guid,
+            className: node.className,
+            name: node.name,
+            path: node.path,
+            parentGuid: node.parentGuid,
+            properties: extraData.properties,
+            attributes: extraData.attributes,
+            tags: extraData.tags,
+          };
+
+          this.tree.updateInstance(updatedData);
+
+          this.ipc.send({
+            type: "instanceUpdated",
+            data: updatedData,
+          });
+        }
       }
-
-      // Update tree
-      this.tree.updateScriptSource(guid, source || "");
-
-      // Send patch to Studio
-      this.ipc.patchScript(guid, source || "");
     } else if (eventType === "add" || (eventType === "change" && !guid)) {
       // If a mapping already exists for this path, treat it as a change
       if (guid) {
-        this.handleFsEvent("change", filePath, source);
+        this.handleFsEvent("change", filePath, source, extraData);
         return;
       }
 
@@ -380,11 +435,10 @@ export class SyncDaemon {
       if (parts.length === 0) return;
 
       const fileName = parts[parts.length - 1];
-      const { className, scriptName } = classifyScriptFileName(fileName, {
-        stripDisambiguationSuffix: true,
-      });
+      const { className, instanceName, isScript } = classifyFileName(fileName);
       const parentSegments = parts.slice(0, -1);
-      const instancePath = [...parentSegments, scriptName];
+      const cleanParentSegments = parentSegments.map((seg) => classifyFileName(seg).instanceName);
+      const instancePath = [...cleanParentSegments, instanceName];
 
       log.info(`File created externally: ${relPath}`);
 
@@ -392,15 +446,18 @@ export class SyncDaemon {
       let currentSegments: string[] = [];
       let parentGuid: string | null = "root";
 
-      for (const segment of parentSegments) {
-        currentSegments.push(segment);
+      for (let i = 0; i < parentSegments.length; i++) {
+        const rawSegment = parentSegments[i];
+        const cleanSegment = cleanParentSegments[i];
+        currentSegments.push(cleanSegment);
         let folderNode = this.tree.getNodeByPath(currentSegments);
         if (!folderNode) {
+          const { className: parentClass } = classifyFileName(rawSegment);
           const folderGuid = generateGUID();
           const folderData = {
             guid: folderGuid,
-            className: "Folder",
-            name: segment,
+            className: parentClass,
+            name: cleanSegment,
             path: [...currentSegments],
             parentGuid,
           };
@@ -416,24 +473,30 @@ export class SyncDaemon {
         parentGuid = folderNode.guid;
       }
 
-      // Create the script node in tree
-      const scriptData = {
+      // Create the node in tree
+      const data: any = {
         guid: newGuid,
         className,
-        name: scriptName,
+        name: instanceName,
         path: instancePath,
         parentGuid,
-        source: source || "",
       };
-      this.tree.updateInstance(scriptData);
+      if (isScript) {
+        data.source = source || "";
+      } else if (extraData) {
+        data.properties = extraData.properties;
+        data.attributes = extraData.attributes;
+        data.tags = extraData.tags;
+      }
+      this.tree.updateInstance(data);
 
       // Register mapping in fileWriter
       this.fileWriter.registerMapping(newGuid, filePath, className);
 
-      // Send script creation to Studio
+      // Send creation to Studio
       this.ipc.send({
         type: "instanceUpdated",
-        data: scriptData,
+        data,
       });
 
       // Regenerate sourcemap
@@ -501,6 +564,12 @@ export class SyncDaemon {
       className === "LocalScript" ||
       className === "ModuleScript"
     );
+  }
+
+  private isSyncableClass(className: string): boolean {
+    if (this.isScriptClass(className)) return true;
+    const classNameLower = className.toLowerCase();
+    return Object.values(config.extraClassSuffixes).some((val) => val.toLowerCase() === classNameLower);
   }
 
   /**
