@@ -24,6 +24,7 @@ export class IPCServer {
   private pingIntervals = new Map<WebSocket, NodeJS.Timeout>();
   private handshakeComplete = false;
   private remoteProtocolVersion: number | null = null;
+  private clientPriority: "studio" | "filesystem" | "none" = "studio";
 
   constructor(port?: number, server?: HttpServer, options?: IPCServerOptions) {
     this.requestSnapshotOnConnect = options?.requestSnapshotOnConnect !== false;
@@ -69,6 +70,13 @@ export class IPCServer {
           log.debug(`Received: ${message.type}`);
 
           if (message.type === "handshakeStudio") {
+            const priority = (message as any).initialSyncPriority;
+            if (priority === "studio" || priority === "filesystem" || priority === "none") {
+              this.clientPriority = priority;
+            } else {
+              this.clientPriority = "studio";
+            }
+
             if (!this.handshakeComplete) {
               this.handshakeComplete = true;
               if (this.handshakeHandler) {
@@ -271,6 +279,13 @@ export class IPCServer {
    */
   public getRemoteProtocolVersion(): number | null {
     return this.remoteProtocolVersion;
+  }
+
+  /**
+   * Get the initial sync priority of the connected plugin client
+   */
+  public getClientPriority(): "studio" | "filesystem" | "none" {
+    return this.clientPriority;
   }
 
   /**

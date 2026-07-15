@@ -1095,6 +1095,7 @@ function SyncSession.new(plugin: Plugin, settingsStore: SettingsStore.SettingsSt
 					msgpack = false,
 					compression = false,
 				},
+				initialSyncPriority = tostring(self.config.INITIAL_SYNC_PRIORITY or "Studio"):lower(),
 			})
 
 			local startTime = tick()

@@ -12,7 +12,7 @@ import {
   loadSourcemapPropertyIndex,
 } from "./sourcemap/propertyLoader.js";
 
-interface BuildOptions {
+interface BuildOptions { 
   syncDir?: string;
   rojoMode?: boolean;
   rojoProjectFile?: string;

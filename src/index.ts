@@ -12,6 +12,7 @@ import { config, initializeConfig } from "./config.js";
 import type { StudioMessage } from "./ipc/messages.js";
 import { generateGUID } from "./util/id.js";
 import { classifyFileName } from "./util/scriptFile.js";
+import { SnapshotBuilder } from "./snapshot.js";
 
 /**
  * Main orchestrator for the Azul daemon
@@ -30,6 +31,7 @@ export class SyncDaemon {
   // bulk `rm -rf` or a git branch switch) so we do at most one full rebuild.
   private fsRegenTimer: NodeJS.Timeout | null = null;
   private fsRegenPending = false;
+  private pendingFilesystemSnapshot: any[] | null = null;
 
   constructor() {
     this.tree = new TreeManager();
@@ -58,7 +60,7 @@ export class SyncDaemon {
     // Handle messages from Studio (WebSocket)
     this.ipc.onMessage((message) => this.handleStudioMessage(message));
     this.ipc.onHandshake(() => {
-      this.ipc.requestSnapshot();
+      this.handleHandshake();
     });
     this.ipc.onDisconnect(() => {
       this.handleClientDisconnect();
@@ -109,6 +111,19 @@ export class SyncDaemon {
         this.handleDeleted(message.data);
         break;
 
+      case "applied":
+        if ((message as any).operation === "build") {
+          this.handleBuildApplied();
+        }
+        break;
+
+      case "rejected":
+        if ((message as any).operation === "build") {
+          log.warn(`Filesystem priority sync was rejected by Studio: ${(message as any).reason ?? "unknown reason"}`);
+          this.ipc.requestSnapshot();
+        }
+        break;
+
       case "ping":
         this.ipc.send({ type: "pong" });
         break;
@@ -142,11 +157,17 @@ export class SyncDaemon {
     // Update tree
     this.tree.applyFullSnapshot(data);
 
-    // Write all scripts to filesystem
-    this.fileWriter.writeTree(this.tree.getAllNodes());
+    const priority = this.ipc.getClientPriority();
+    if (priority === "none") {
+      log.info("Reconciling in-memory tree mappings without writing to filesystem...");
+      this.fileWriter.populateMappingsFromExistingFiles(this.tree.getAllNodes());
+    } else {
+      // Write all scripts to filesystem
+      this.fileWriter.writeTree(this.tree.getAllNodes());
 
-    // Remove any pre-existing files that are no longer mapped (optional)
-    this.cleanupOrphanFiles();
+      // Remove any pre-existing files that are no longer mapped (optional)
+      this.cleanupOrphanFiles();
+    }
 
     // Start file watching
     this.fileWatcher.watch(this.fileWriter.getBaseDir());
@@ -158,6 +179,67 @@ export class SyncDaemon {
     const stats = this.tree.getStats();
     log.success(
       `Sync complete: ${stats.scriptNodes} scripts, ${stats.totalNodes} total nodes`,
+    );
+  }
+
+  /**
+   * Handle handshake event and determine initial sync flow based on priority
+   */
+  private handleHandshake(): void {
+    const priority = this.ipc.getClientPriority();
+    log.info(`Handshake completed. Client initial sync priority: ${priority}`);
+
+    if (priority === "filesystem") {
+      log.info("Starting initial sync with Filesystem priority...");
+      void (async () => {
+        try {
+          const builder = new SnapshotBuilder({
+            sourceDir: config.syncDir,
+            destPrefix: [],
+          });
+          const instances = await builder.build();
+
+          log.info(`Building local filesystem snapshot... Found ${instances.length} syncable instances.`);
+          this.pendingFilesystemSnapshot = instances;
+
+          this.ipc.send({
+            type: "buildSnapshot",
+            data: instances,
+            destructive: config.deleteOrphansOnConnect,
+            reason: "Initial sync (Filesystem priority)",
+          });
+        } catch (error) {
+          log.error("Failed to build local snapshot for filesystem priority:", error);
+          // Fall back to requesting snapshot from Studio to avoid getting stuck
+          this.ipc.requestSnapshot();
+        }
+      })();
+    } else if (priority === "none") {
+      log.info("Initial sync priority is 'none'. Requesting full snapshot to build tree without writing files.");
+      this.ipc.requestSnapshot();
+    } else {
+      // Default: "studio"
+      log.info("Starting initial sync with Studio priority...");
+      this.ipc.requestSnapshot();
+    }
+  }
+
+  /**
+   * Handle applied message for build operations
+   */
+  private handleBuildApplied(): void {
+    if (this.pendingFilesystemSnapshot) {
+      this.tree.applyFullSnapshot(this.pendingFilesystemSnapshot);
+      this.pendingFilesystemSnapshot = null;
+    }
+
+    this.fileWriter.populateMappingsFromExistingFiles(this.tree.getAllNodes());
+    this.fileWatcher.watch(this.fileWriter.getBaseDir());
+    this.regenerateSourcemap();
+
+    const stats = this.tree.getStats();
+    log.success(
+      `Sync complete (Filesystem priority): ${stats.scriptNodes} scripts, ${stats.totalNodes} total nodes`,
     );
   }
 

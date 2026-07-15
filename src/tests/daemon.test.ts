@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { SyncDaemon } from "../index.js";
-import { config } from "../config.js";
+import { config, _resetConfig, initializeConfig } from "../config.js";
 
 function makeTempDir(prefix = "azul-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -318,5 +318,41 @@ test("filesystem-initiated file deletion (unlink event) triggers deleted message
     config.sourcemapPath = prevSourcemapPath;
     config.port = prevPort;
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("initializeConfig loads and merges local project config (azul.json) if present", () => {
+  const localConfigPath = path.resolve(process.cwd(), "azul.json");
+
+  // Backup existing azul.json if any
+  const backupExists = fs.existsSync(localConfigPath);
+  let backupContent = "";
+  if (backupExists) {
+    backupContent = fs.readFileSync(localConfigPath, "utf8");
+  }
+
+  try {
+    const testConfig = {
+      syncDir: "./test-sync-dir-override",
+      port: 9999,
+    };
+    fs.writeFileSync(localConfigPath, JSON.stringify(testConfig, null, 2), "utf8");
+
+    _resetConfig();
+    initializeConfig();
+
+    assert.strictEqual(config.port, 9999);
+    assert.strictEqual(config.syncDir, "./test-sync-dir-override");
+  } finally {
+    // Restore backup or delete
+    if (backupExists) {
+      fs.writeFileSync(localConfigPath, backupContent, "utf8");
+    } else if (fs.existsSync(localConfigPath)) {
+      fs.unlinkSync(localConfigPath);
+    }
+    
+    // Reset config back to default state
+    _resetConfig();
+    initializeConfig();
   }
 });

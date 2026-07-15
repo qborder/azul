@@ -44,6 +44,7 @@ ${c.bold}Usage:${c.reset}
 
 ${c.bold}Commands:${c.reset} 
   ${c.bold}(no command)${c.reset}              Start live sync daemon
+  ${c.bold}init${c.reset}                      Interactive project initializer
   ${c.bold}build${c.reset}                     One-time push from filesystem into Studio
   ${c.bold}push${c.reset}                      Selective push using mappings (place config or -s/-d)
   ${c.bold}pack${c.reset}                      Serialize Studio instance properties into sourcemap.json
@@ -100,6 +101,70 @@ if (parsedArgs.command === "config") {
     log.info(`Opened Azul config: ${userConfigPath}`);
   } catch (error) {
     throw new Error(`Failed to open config file: ${error}`);
+  }
+
+  process.exit(0);
+}
+
+if (parsedArgs.command === "init") {
+  const localConfigPath = resolve(process.cwd(), "azul.json");
+  if (fs.existsSync(localConfigPath)) {
+    log.warn(`Project is already initialized. 'azul.json' already exists at: ${localConfigPath}`);
+    const overwrite = await prompt.getYesNoInput("Overwrite existing configuration? (Y/N)");
+    if (!overwrite) {
+      log.info("Exiting project initialization.");
+      process.exit(0);
+    }
+  }
+
+  log.info("Starting Azul project initialization...");
+
+  const syncDirInput = await prompt.getInput("Enter sync directory path (default: './sync')");
+  const syncDir = syncDirInput.trim() === "" ? "./sync" : syncDirInput.trim();
+
+  let port = 8080;
+  const portInput = await prompt.getInput("Enter WebSocket port (default: 8080)");
+  if (portInput.trim() !== "") {
+    const p = Number(portInput.trim());
+    if (!isNaN(p) && p > 0 && p <= 65535) {
+      port = p;
+    } else {
+      log.warn("Invalid port, falling back to 8080");
+    }
+  }
+
+  const extInput = await prompt.getInput("Enter script extension (.lua or .luau) (default: '.luau')");
+  let scriptExtension = extInput.trim() === "" ? ".luau" : extInput.trim();
+  if (!scriptExtension.startsWith(".")) {
+    scriptExtension = `.${scriptExtension}`;
+  }
+
+  const useRojo = await prompt.getYesNoInput("Do you want to use Rojo compatibility mode? (Y/N)");
+
+  // Create sync directory
+  const resolvedSyncDir = resolve(process.cwd(), syncDir);
+  try {
+    fs.mkdirSync(resolvedSyncDir, { recursive: true });
+    log.info(`Created sync directory at: ${resolvedSyncDir}`);
+  } catch (error) {
+    log.error(`Failed to create sync directory: ${error}`);
+  }
+
+  const projectConfig: Record<string, any> = {
+    syncDir,
+    port,
+    scriptExtension,
+  };
+
+  if (useRojo) {
+    log.info("Rojo compatibility mode enabled. You can place a 'default.project.json' file in your project root.");
+  }
+
+  try {
+    fs.writeFileSync(localConfigPath, JSON.stringify(projectConfig, null, 2) + "\n", "utf8");
+    log.success(`Project initialized successfully! Saved config to: ${localConfigPath}`);
+  } catch (error) {
+    log.error(`Failed to write local config file: ${error}`);
   }
 
   process.exit(0);

@@ -556,4 +556,32 @@ export class FileWriter {
       }
     }
   }
+
+  /**
+   * Populate mappings from existing files on disk without writing them
+   */
+  public populateMappingsFromExistingFiles(nodes: Map<string, TreeNode>): void {
+    log.info("Populating file mappings from existing files...");
+    this.fileMappings.clear();
+    this.pathToGuid.clear();
+
+    const pathMap = new Map<string, TreeNode>();
+    for (const node of nodes.values()) {
+      pathMap.set(node.path.join("/"), node);
+    }
+
+    for (const node of nodes.values()) {
+      if (!this.isSyncableNode(node)) continue;
+      const filePath = this.getFilePathWithCollisionMap(node, undefined, pathMap);
+      if (fs.existsSync(filePath)) {
+        this.fileMappings.set(node.guid, {
+          guid: node.guid,
+          filePath: filePath,
+          className: node.className,
+        });
+        this.pathToGuid.set(path.resolve(filePath), node.guid);
+      }
+    }
+    log.success(`Mapped ${this.fileMappings.size} existing files to virtual tree`);
+  }
 }

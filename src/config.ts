@@ -74,6 +74,11 @@ export const config: AzulConfig = { ...defaultConfig };
 
 let initialized = false;
 
+export function _resetConfig(): void {
+  initialized = false;
+  Object.assign(config, defaultConfig);
+}
+
 export function getUserConfigPath(): string {
   const configRoot = getPlatformConfigRoot();
   return path.join(configRoot, "azul", "config.json");
@@ -97,6 +102,22 @@ export function initializeConfig(): void {
   addMissingFields(userConfig);
 
   Object.assign(config, userConfig);
+
+  // Load project-local configuration if present
+  const localConfigPath = path.resolve(process.cwd(), "azul.json");
+  if (fs.existsSync(localConfigPath)) {
+    try {
+      const raw = fs.readFileSync(localConfigPath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (isRecord(parsed)) {
+        const sanitized = sanitizeConfig(parsed);
+        Object.assign(config, sanitized);
+        log.debug(`Loaded local project config from: ${localConfigPath}`);
+      }
+    } catch (error) {
+      log.warn(`Failed to read local project config: ${error}`);
+    }
+  }
 }
 
 function getPlatformConfigRoot(): string {

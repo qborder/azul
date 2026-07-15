@@ -141,6 +141,7 @@ export interface HandshakeMessageStudio {
   pluginVersion?: number | string;
   /** Optional transport capabilities the plugin supports. */
   capabilities?: { msgpack?: boolean; compression?: boolean };
+  initialSyncPriority?: "studio" | "filesystem" | "none";
 }
 
 /**
